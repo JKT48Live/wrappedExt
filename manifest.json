@@ -1,0 +1,49 @@
+{
+  "name": "JKT48 Wrapped",
+  "version": "1.0.0",
+  "description": "JKT48 Wrapped",
+  "author": "JKT48 Live",
+  "permissions": [
+    "activeTab",
+    "webRequest",
+    "storage",
+    "tabs",
+    "contextMenus",
+    "cookies"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [ "https://jkt48.com/*" ],
+      "js": ["src/content.js","src/jquery-3.5.1.min.js", "src/crypto-js.min.js"]
+    }
+  ],
+  "options_page": "src/options.html",
+  "action": {
+    "default_icon": {
+      "16": "images/logo-16.png",
+      "48": "images/logo-48.png",
+      "128": "images/logo-128.png"
+    },
+    "default_title": "JKT48 Wrapped",
+    "default_popup": "src/popup.html"
+  },
+  "icons": {
+    "16": "images/logo-128.png",
+    "32": "images/logo-128.png",
+    "48": "images/logo-128.png",
+    "128": "images/logo-128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [  "models/*, images/*" ],
+      "matches": [ "https://jkt48.com/*" ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; script-src-elem 'self' 'unsafe-inline'"
+  },
+  "manifest_version": 3
+}
