@@ -4,12 +4,7 @@
   "description": "JKT48 Wrapped",
   "author": "JKT48 Live",
   "permissions": [
-    "activeTab",
-    "webRequest",
-    "storage",
-    "tabs",
-    "contextMenus",
-    "cookies"
+    "activeTab"
   ],
   "background": {
     "service_worker": "src/background.js"
