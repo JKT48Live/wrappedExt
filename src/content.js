@@ -82,7 +82,6 @@ chrome.runtime.onMessage.addListener(
                 }
             }
 
-
             login().then(response => {
                 sendResponse({ data: response });
             }).catch(error => {
