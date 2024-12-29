@@ -25,9 +25,10 @@ chrome.runtime.onMessage.addListener(
                     const tableData = await scrapeTableData(page).then(res => res);
                     tableData.forEach(row => {
                         const year = parseInt(row[2].split(' ')[2]); // Extract year and convert to integer
-                        if (year >= 2022) { // Check if year is 2022 or later
+                        uniqueYears.add(year);
+                        /*if (year >= 2022) { // Check if year is 2022 or later
                             uniqueYears.add(year);
-                        }
+                        }*/
                     });
                 }
 
