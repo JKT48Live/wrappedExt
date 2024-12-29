@@ -26,6 +26,12 @@
                         option.text = year.year;
                         yearSelect.add(option);
                     });
+
+                    const allTimeOption = document.createElement('option');
+                    allTimeOption.value = "all";
+                    allTimeOption.text = "All Time";
+                    yearSelect.add(allTimeOption);
+
                     yearSelectorDiv.style.display = 'block';
                     loginBtn.style.display = 'none';
                     resultText.style.display = 'none';
@@ -49,10 +55,10 @@
                 console.log('Received response:', response);
                 if (response && response.data.success) {
                     resultText.style.display = 'none';
-                    const resulto = { data: response.data.data, year: selectedYear }
+                    const tahun = (selectedYear == "all") ? "All Time" : selectedYear;
+                    const resulto = { data: response.data.data, year: tahun }
 
                     const encryptedData = CryptoJS.AES.encrypt(JSON.stringify(resulto), secretKey).toString();
-                    //chrome.tabs.create({ url: `https://jkt48live.github.io/wrappedExtWeb/${encodeURIComponent(JSON.stringify(resulto))}` });
                     chrome.tabs.create({ url: `https://jkt48live.github.io/wrappedExtWeb/${encodeURIComponent(encryptedData)}` });
                 } else {
                     resultText.innerText = 'Gagal mengambil data.';

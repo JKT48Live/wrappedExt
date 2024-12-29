@@ -84,7 +84,6 @@ chrome.runtime.onMessage.addListener(
 
 
             login().then(response => {
-                console.log(response);
                 sendResponse({ data: response });
             }).catch(error => {
                 console.error('Error:', error);
@@ -274,7 +273,8 @@ chrome.runtime.onMessage.addListener(
                         const tableData = await scrapeTheaterTableData(page).then(res => res);
 
                         tableData.forEach(row => {
-                            const entryYear = row[1].split(' ')[2];
+                            //row 3 Hari/Tanggal
+                            const entryYear = row[3].split(' ')[2];
                             if (year && entryYear !== year.toString()) {
                                 return;
                             }
@@ -311,7 +311,8 @@ chrome.runtime.onMessage.addListener(
                         const tableData = await scrapeTheaterTableData(page).then(res => res);
 
                         tableData.forEach(row => {
-                            const entryYear = row[1].split(' ')[2]; // Assuming '15 November 2023' format
+                            //row 3 Hari/Tanggal
+                            const entryYear = row[3].split(' ')[2]; // Assuming '15 November 2023' format
                             if (year && entryYear !== year.toString()) {
                                 return;
                             }
@@ -581,81 +582,174 @@ chrome.runtime.onMessage.addListener(
                         videoCall: {},
                         topUp: {}
                     };
+            
+                    if (year === "all") {
+                        // Ambil semua tahun
+                        const years = await getAllYears();
+                        let allSetlists = [];
+                        let allWinLossData = { wins: 0, losses: 0 };
+                        let allVideoCalls = { topMembers: {}, totalTickets: 0 };
+                        let allSpendTable = [];
+                        let allEvents = [];
+            
+                        for (const yr of years) {
 
-                    const yearSelected = year;
+                            const [topSetlists, winLossData, topVideoCalls, profile, spendTable, myPej, lastEvent] = await Promise.all([
+                                fetchTopSetlists(yr),
+                                calculateWinLossRate(yr),
+                                fetchTopVideoCallMembersByYear(yr),
+                                scrapeProfile(),
+                                getAllTableData(),
+                                myPage(),
+                                fetchTopThreeEventWins(yr)
+                            ]);
+            
+                            data.name = profile;
+                            data.oshi = myPej.oshi;
+                            data.oshiPic = myPej.oshiPic;
 
-                    const [topSetlists, winLossData, topVideoCalls, profile, spendTable, myPej, lastEvent] = await Promise.all([
-                        fetchTopSetlists(yearSelected),
-                        calculateWinLossRate(yearSelected),
-                        fetchTopVideoCallMembersByYear(yearSelected),
-                        scrapeProfile(),
-                        getAllTableData(),
-                        myPage(),
-                        fetchTopThreeEventWins(yearSelected)
-                    ]);
+                            // Gabungkan data setlists
+                            allSetlists = allSetlists.concat(topSetlists);
+            
+                            // Tambahkan data win/loss
+                            allWinLossData.wins += winLossData.wins;
+                            allWinLossData.losses += winLossData.losses;
+            
+                            allEvents = allEvents.concat(lastEvent);
 
-                    data.name = profile;
-                    data.oshi = myPej.oshi;
-                    data.oshiPic = myPej.oshiPic;
-
-                    // Theater
-                    if (topSetlists.length !== 0) {
-                        // Menambahkan Top 3 Setlist
-                        data.theater.topSetlists = topSetlists.slice(0, 3).map((setlist, index) => {
-                            const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
-                            return `${medal} ${setlist.name} - ${setlist.wins}x`;
-                        });
-                    } else {
-                        data.theater.topSetlists = "Belum pernah Theateran 😭";
-                    }
-
-                    // Menambahkan Winrate data
-                    data.theater.winrate = {
-                        rate: winLossData.winRate,
-                        detail: {
-                            menang: winLossData.wins,
-                            kalah: winLossData.losses
+                            // Gabungkan data video calls
+                            for (const member of topVideoCalls.topMembers) {
+                                if (!allVideoCalls.topMembers[member.name]) {
+                                    allVideoCalls.topMembers[member.name] = 0;
+                                }
+                                allVideoCalls.topMembers[member.name] += member.tickets;
+                            }
+                            allVideoCalls.totalTickets += topVideoCalls.totalTickets;
+            
+                            // Gabungkan data top-up
+                            allSpendTable = spendTable;
                         }
-                    };
+            
+                        // Format data yang digabungkan
+                        data.theater.topSetlists = allSetlists
+                            .reduce((acc, item) => {
+                                const found = acc.find(x => x.name === item.name);
+                                if (found) {
+                                    found.wins += item.wins;
+                                } else {
+                                    acc.push(item);
+                                }
+                                return acc;
+                            }, [])
+                            .slice(0, 3).map((setlist, index) => {
+                                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
+                                return `${medal} ${setlist.name} - ${setlist.wins}x`;
+                            })
+            
+                        data.theater.winrate = {
+                            rate: ((allWinLossData.wins / (allWinLossData.wins + allWinLossData.losses)) * 100).toFixed(2) + '%',
+                            detail: {
+                                menang: allWinLossData.wins,
+                                kalah: allWinLossData.losses
+                            }//allWinLossData
+                        };
 
-                    // Event
-                    if (lastEvent.length !== 0) {
-                        data.events.lastEvents = lastEvent.slice(0, 3).map(event => event.name);
+                        // Format data event
+                        allEvents.sort((a, b) => new Date(b.date) - new Date(a.date)); // Urutkan berdasarkan tanggal terbaru
+                        data.events.lastEvents = allEvents.slice(0, 3).map(event => event.name);
+            
+                        data.videoCall.topMembers = Object.entries(allVideoCalls.topMembers)
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 3)
+                            .map(([name, tickets], index) => {
+                                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
+                                return `${medal} ${name} - ${tickets} tiket`;
+                            });
+                        data.videoCall.totalTickets = allVideoCalls.totalTickets;
+            
+                        const byYear = extractAndSumValuesByYear(allSpendTable);
+                        let totalTopup = 0;
+                        for (const yr in byYear) {
+                            const spendData = formatYearData(byYear, yr);
+                            totalTopup += spendData.totalTopup;
+                        }
+            
+                        data.topUp = `${numbFormat(totalTopup)} P`;
                     } else {
-                        data.events = "Belum pernah ikut Event 😭";
+                        // Jika tahun tertentu dipilih, proses data untuk tahun tersebut
+                        const yearSelected = year;
+                        const [topSetlists, winLossData, topVideoCalls, profile, spendTable, myPej, lastEvent] = await Promise.all([
+                            fetchTopSetlists(yearSelected),
+                            calculateWinLossRate(yearSelected),
+                            fetchTopVideoCallMembersByYear(yearSelected),
+                            scrapeProfile(),
+                            getAllTableData(),
+                            myPage(),
+                            fetchTopThreeEventWins(yearSelected)
+                        ]);
+            
+                        data.name = profile;
+                        data.oshi = myPej.oshi;
+                        data.oshiPic = myPej.oshiPic;
+
+                        // Theater
+                        if (topSetlists.length !== 0) {
+                            // Menambahkan Top 3 Setlist
+                            data.theater.topSetlists = topSetlists.slice(0, 3).map((setlist, index) => {
+                                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
+                                return `${medal} ${setlist.name} - ${setlist.wins}x`;
+                            });
+                        } else {
+                            data.theater.topSetlists = "Belum pernah Theateran 😭";
+                        }
+
+                        // Menambahkan Winrate data
+                        data.theater.winrate = {
+                            rate: winLossData.winRate,
+                            detail: {
+                                menang: winLossData.wins,
+                                kalah: winLossData.losses
+                            }
+                        };
+
+                        // Event
+                        if (lastEvent.length !== 0) {
+                            data.events.lastEvents = lastEvent.slice(0, 3).map(event => event.name);
+                        } else {
+                            data.events = "Belum pernah ikut Event 😭";
+                        }
+
+                        // Video Call
+                        if (topVideoCalls.topMembers.length !== 0) {
+                            data.videoCall.topMembers = topVideoCalls.topMembers.slice(0, 3).map((member, index) => {
+                                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
+                                return `${medal} ${member.name} - ${member.tickets} tiket`;
+                            });
+
+                            data.videoCall.totalTickets = topVideoCalls.totalTickets;
+                        } else {
+                            data.videoCall = "Belum pernah Video Call 😭";
+                        }
+
+                        // Top-up
+                        const byYear = extractAndSumValuesByYear(spendTable);
+                        if (byYear[yearSelected]) {
+                            const spendData = formatYearData(byYear, yearSelected);
+                            data.topUp = `${numbFormat(spendData.totalTopup)} P`;
+                        } else {
+                            data.topUp = "0 P";
+                        }
                     }
-
-                    // Video Call
-                    if (topVideoCalls.topMembers.length !== 0) {
-                        data.videoCall.topMembers = topVideoCalls.topMembers.slice(0, 3).map((member, index) => {
-                            const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
-                            return `${medal} ${member.name} - ${member.tickets} tiket`;
-                        });
-
-                        data.videoCall.totalTickets = topVideoCalls.totalTickets;
-                    } else {
-                        data.videoCall = "Belum pernah Video Call 😭";
-                    }
-
-                    // Top-up
-                    const byYear = extractAndSumValuesByYear(spendTable);
-                    if (byYear[yearSelected]) {
-                        const spendData = formatYearData(byYear, yearSelected);
-                        data.topUp = `${numbFormat(spendData.totalTopup)} P`;
-                    } else {
-                        data.topUp = "0 P";
-                    }
-
+            
                     res.json({ success: true, data });
-                } catch (err) {
-                    console.error(err);
+                } catch (error) {
+                    console.error(error);
                     res.status(500).json({ success: false, message: "Terjadi kesalahan pada server" });
                 }
-            };
+            };                   
 
             getData({ body: { year: request.year } }, {
                 json: (data) => {
-                    console.log(data);
                     sendResponse({ data });
                 },
                 status: (code) => {
