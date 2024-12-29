@@ -674,7 +674,8 @@ chrome.runtime.onMessage.addListener(
                             const spendData = formatYearData(byYear, yr);
                             totalTopup += spendData.totalTopup;
                         }
-            
+
+                        data.years = years.sort((a, b) => a - b);
                         data.topUp = `${numbFormat(totalTopup)} P`;
                     } else {
                         // Jika tahun tertentu dipilih, proses data untuk tahun tersebut
@@ -740,8 +741,9 @@ chrome.runtime.onMessage.addListener(
                         } else {
                             data.topUp = "0 P";
                         }
+
+                        data.years = year;
                     }
-            
                     res.json({ success: true, data });
                 } catch (error) {
                     console.error(error);
