@@ -631,19 +631,21 @@ chrome.runtime.onMessage.addListener(
             
                         // Format data yang digabungkan
                         data.theater.topSetlists = allSetlists
-                            .reduce((acc, item) => {
-                                const found = acc.find(x => x.name === item.name);
-                                if (found) {
-                                    found.wins += item.wins;
-                                } else {
-                                    acc.push(item);
-                                }
-                                return acc;
-                            }, [])
-                            .slice(0, 3).map((setlist, index) => {
-                                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
-                                return `${medal} ${setlist.name} - ${setlist.wins}x`;
-                            })
+                        .reduce((acc, item) => {
+                            const found = acc.find(x => x.name === item.name);
+                            if (found) {
+                                found.wins += item.wins;
+                            } else {
+                                acc.push(item);
+                            }
+                            return acc;
+                        }, [])
+                        .sort((a, b) => b.wins - a.wins)
+                        .slice(0, 3)
+                        .map((setlist, index) => {
+                            const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
+                            return `${medal} ${setlist.name} - ${setlist.wins}x`;
+                        });
             
                         data.theater.winrate = {
                             rate: ((allWinLossData.wins / (allWinLossData.wins + allWinLossData.losses)) * 100).toFixed(2) + '%',
