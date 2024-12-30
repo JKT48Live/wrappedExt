@@ -1,27 +1,72 @@
+/* Base styles */
 body {
   padding: 4px;
-  width: 200px;
+  width: 250px; /* Lebar tetap */
   justify-content: center;
   text-align: center;
+  background-color: #1d2123;
+  color: #ffffff;
+  font-family: Arial, sans-serif;
+  border-radius: 16px; /* Membuat tepi kotak membulat */
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5); /* Menambahkan efek bayangan */
+  overflow: hidden; /* Agar konten tidak keluar dari border rounded */
 }
 
+/* Header */
+h1 {
+  font-size: 18px;
+  margin-bottom: 16px;
+  color: #fff;
+}
 
-#login, #submit{
+/* Buttons */
+#login, #submit {
   border: none;
-  padding:6 10;
-  width: 80%;
-  border-radius: 4px;
-  background-color: blue;
+  padding: 10px;
+  width: 80%; /* Tetap lebar tombol konsisten */
+  border-radius: 8px; /* Membulatkan tombol */
+  background-color: #282b30; /* Warna biru yang lebih lembut */
   color: white;
   margin-top: 12px;
   cursor: pointer;
+  font-size: 14px;
+  transition: background-color 0.3s ease;
 }
 
-h2 {
-    margin: 0;
+#login:hover, #submit:hover {
+  background-color: #99131c; /* Efek hover lebih gelap */
 }
 
+/* Year Selector */
+#yearSelector label {
+  font-size: 14px;
+  margin-bottom: 8px;
+  display: block;
+  text-align: left;
+  color: #cccccc;
+}
+
+#year {
+  width: 80%;
+  padding: 6px;
+  border: none;
+  border-radius: 8px; /* Membulatkan dropdown */
+  margin-top: 10px;
+  background-color: #33383b;
+  color: #ffffff;
+}
+
+/* Result text */
+#result {
+  font-size: 14px;
+  margin-top: 16px;
+}
+
+/* Footer */
 footer {
   text-align: center;
   padding: 10px;
+  font-size: 12px;
+  color: #aaaaaa;
+  margin-top: auto; /* Pastikan footer tetap di bawah */
 }
