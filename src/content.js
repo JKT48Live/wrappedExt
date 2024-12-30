@@ -745,53 +745,69 @@ chrome.runtime.onMessage.addListener(
                         }
             
                         // Format data yang digabungkan
-                        data.theater.topSetlists = allSetlists
-                            .reduce((acc, item) => {
-                                const found = acc.find(x => x.name === item.name);
-                                if (found) {
-                                    found.wins += item.wins;
-                                } else {
-                                    acc.push(item);
-                                }
-                                return acc;
-                            }, [])
-                            .sort((a, b) => b.wins - a.wins)
-                            .slice(0, 3)
-                            .map((setlist, index) => {
-                                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
-                                return `${medal} ${setlist.name} - ${setlist.wins}x`;
-                            });
+                        if (allSetlists.length !== 0) {
+                            data.theater.topSetlists = allSetlists
+                                .reduce((acc, item) => {
+                                    const found = acc.find(x => x.name === item.name);
+                                    if (found) {
+                                        found.wins += item.wins;
+                                    } else {
+                                        acc.push(item);
+                                    }
+                                    return acc;
+                                }, [])
+                                .sort((a, b) => b.wins - a.wins)
+                                .slice(0, 3)
+                                .map((setlist, index) => {
+                                    const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
+                                    return `${medal} ${setlist.name} - ${setlist.wins}x`;
+                                });
+                        } else {
+                            data.theater.topSetlists = "Belum pernah Theateran 😭";
+                        }
             
                         data.theater.winrate = {
                             rate: ((allWinLossData.wins / (allWinLossData.wins + allWinLossData.losses)) * 100).toFixed(2) + '%',
                             detail: {
                                 menang: allWinLossData.wins,
                                 kalah: allWinLossData.losses
-                            }//allWinLossData
+                            }
                         };
 
                         // Format data event
-                        allEvents.sort((a, b) => new Date(b.date) - new Date(a.date)); // Urutkan berdasarkan tanggal terbaru
-                        data.events.lastEvents = allEvents.slice(0, 3).map(event => event.name);
+                        if (allEvents.length !== 0) {
+                            allEvents.sort((a, b) => new Date(b.date) - new Date(a.date)); // Urutkan berdasarkan tanggal terbaru
+                            data.events.lastEvents = allEvents.slice(0, 3).map(event => event.name);
+                        } else {
+                            data.events = "Belum pernah ikut Event 😭";
+                        }
             
-                        data.videoCall.topMembers = Object.entries(allVideoCalls.topMembers)
-                            .sort((a, b) => b[1] - a[1])
-                            .slice(0, 3)
-                            .map(([name, tickets], index) => {
-                                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
-                                return `${medal} ${name} - ${tickets} tiket`;
-                            });
-                        data.videoCall.totalTickets = allVideoCalls.totalTickets;
+                        if (allVideoCalls.topMembers.length !== 0) {
+                            data.videoCall.topMembers = Object.entries(allVideoCalls.topMembers)
+                                .sort((a, b) => b[1] - a[1])
+                                .slice(0, 3)
+                                .map(([name, tickets], index) => {
+                                    const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
+                                    return `${medal} ${name} - ${tickets} tiket`;
+                                });
+                            data.videoCall.totalTickets = allVideoCalls.totalTickets;
+                        } else {
+                            data.videoCall = "Belum pernah Video Call 😭";
+                        }
 
                         //2s
-                        data.twoShot.topMembers = Object.entries(allTwoShots.topMembers)
-                            .sort((a, b) => b[1] - a[1])
-                            .slice(0, 3)
-                            .map(([name, tickets], index) => {
-                                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
-                                return `${medal} ${name} - ${tickets} tiket`;
-                            });
-                        data.twoShot.totalTickets = allTwoShots.totalTickets;
+                        if (allTwoShots.topMembers.length !== 0) {
+                            data.twoShot.topMembers = Object.entries(allTwoShots.topMembers)
+                                .sort((a, b) => b[1] - a[1])
+                                .slice(0, 3)
+                                .map(([name, tickets], index) => {
+                                    const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
+                                    return `${medal} ${name} - ${tickets} tiket`;
+                                });
+                            data.twoShot.totalTickets = allTwoShots.totalTickets;
+                        } else {
+                            data.twoShot = "Belum pernah Two Shot 😭";
+                        }
             
                         const byYear = extractAndSumValuesByYear(allSpendTable);
                         let totalTopup = 0;
@@ -882,7 +898,7 @@ chrome.runtime.onMessage.addListener(
 
                         data.years = year;
                     }
-                    
+
                     res.json({ success: true, data });
                 } catch (error) {
                     console.error(error);
