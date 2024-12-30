@@ -527,7 +527,110 @@ chrome.runtime.onMessage.addListener(
                     return { topMembers: [], totalTickets: 0 };
                 }
             }
+
+            //2s
+            async function fetchTopTwoShotMembersByYear(year) {
+                try {
+                    const sessionResponse = await fetch('https://jkt48.com/mypage/twoshot-session?lang=id');
+                    if (!sessionResponse.ok) {
+                        throw new Error(`HTTP error! Status: ${sessionResponse.status}`);
+                    }
             
+                    const sessionText = await sessionResponse.text();
+                    const parser = new DOMParser();
+                    const sessionDoc = parser.parseFromString(sessionText, 'text/html');
+            
+                    // Fungsi untuk memuat semua halaman handshake
+                    async function fetchAllTwoShotPages() {
+                        let allTwoShotData = [];
+                        let page = 1;
+                        let hasNextPage = true;
+            
+                        while (hasNextPage) {
+                            const listResponse = await fetch(`https://jkt48.com/mypage/twoshot-list?page=${page}&lang=id`);
+                            if (!listResponse.ok) {
+                                throw new Error(`HTTP error! Status: ${listResponse.status}`);
+                            }
+            
+                            const listText = await listResponse.text();
+                            const listDoc = parser.parseFromString(listText, 'text/html');
+                            
+                            const twoShotList = Array.from(listDoc.querySelectorAll('tbody tr')).map(row => {
+                                const name = row.querySelector('td:nth-child(4)')?.textContent?.trim() || null;
+                                const orderDate = row.querySelector('td:nth-child(3)')?.textContent?.trim() || null;
+                                const yearMatch = orderDate?.match(/\d{4}/);
+                                return {
+                                    name,
+                                    year: yearMatch ? parseInt(yearMatch[0], 10) : null,
+                                };
+                            }).filter(item => item.name && item.year);
+            
+                            allTwoShotData = [...allTwoShotData, ...twoShotList];
+            
+                            // Mengecek apakah ada halaman berikutnya
+                            const nextPageLink = listDoc.querySelector('.entry-news__list--pagination .next a');
+                            hasNextPage = nextPageLink !== null;
+                            page++;
+                        }
+            
+                        return allTwoShotData;
+                    }
+            
+                    const twoShotList = await fetchAllTwoShotPages();
+            
+                    // Fungsi untuk mendapatkan tahun berdasarkan judul handshake
+                    function getYearByTitle(title) {
+                        const cleanTitle = title.replace(/[^a-zA-Z0-9\s]/g, '');
+                        const match = twoShotList.find(item => {
+                            return item.name.replace(/[^a-zA-Z0-9\s]/g, '').trim() === cleanTitle.trim();
+                        });
+                        return match?.year || null;
+                    }
+            
+                    let memberTicketData = {};
+                    let totalTickets = 0;
+            
+                    Array.from(sessionDoc.querySelectorAll('h4')).forEach(element => {
+                        const sessionTitle = element.textContent.trim();
+                        let sessionYear = sessionTitle.match(/\d{4}/)?.[0];
+            
+                        if (!sessionYear) {
+                            sessionYear = getYearByTitle(sessionTitle);
+                        } else {
+                            sessionYear = parseInt(sessionYear, 10);
+                        }
+            
+                        if (sessionYear == year) {
+                            const historyTable = element.nextElementSibling?.querySelector('.entry-mypage__history table.table tbody');
+                            if (!historyTable) return;
+            
+                            Array.from(historyTable.querySelectorAll('tr')).forEach(row => {
+                                const memberName = row.querySelector('td:nth-child(5)')?.textContent?.trim() || null;
+                                const ticketsBought = parseInt(row.querySelector('td:nth-child(6)')?.textContent?.trim(), 10) || 0;
+            
+                                if (memberName) {
+                                    totalTickets += ticketsBought;
+            
+                                    if (!memberTicketData[memberName]) {
+                                        memberTicketData[memberName] = 0;
+                                    }
+                                    memberTicketData[memberName] += ticketsBought;
+                                }
+                            });
+                        }
+                    });
+            
+                    const sortedMembers = Object.entries(memberTicketData)
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 3)
+                        .map(member => ({ name: member[0], tickets: member[1] }));
+            
+                    return { topMembers: sortedMembers, totalTickets };
+                } catch (error) {
+                    console.error('Error in fetchTopTwoShotMembersByYear:', error);
+                    return { topMembers: [], totalTickets: 0 };
+                }
+            }
 
             function formatYearData(byYear, year) {
                 let result = `<b>=== ${year} ===</b>\n`;
@@ -579,7 +682,8 @@ chrome.runtime.onMessage.addListener(
                         theater: {},
                         events: {},
                         videoCall: {},
-                        topUp: {}
+                        topUp: {},
+                        twoShot: {}
                     };
             
                     if (year === "all") {
@@ -590,17 +694,19 @@ chrome.runtime.onMessage.addListener(
                         let allVideoCalls = { topMembers: {}, totalTickets: 0 };
                         let allSpendTable = [];
                         let allEvents = [];
+                        let allTwoShots = { topMembers: {}, totalTickets: 0 };
             
                         for (const yr of years) {
 
-                            const [topSetlists, winLossData, topVideoCalls, profile, spendTable, myPej, lastEvent] = await Promise.all([
+                            const [topSetlists, winLossData, topVideoCalls, profile, spendTable, myPej, lastEvent, topTwoShots] = await Promise.all([
                                 fetchTopSetlists(yr),
                                 calculateWinLossRate(yr),
                                 fetchTopVideoCallMembersByYear(yr),
                                 scrapeProfile(),
                                 getAllTableData(),
                                 myPage(),
-                                fetchTopThreeEventWins(yr)
+                                fetchTopThreeEventWins(yr),
+                                fetchTopTwoShotMembersByYear(yr),
                             ]);
             
                             data.name = profile;
@@ -624,6 +730,15 @@ chrome.runtime.onMessage.addListener(
                                 allVideoCalls.topMembers[member.name] += member.tickets;
                             }
                             allVideoCalls.totalTickets += topVideoCalls.totalTickets;
+
+                            // Gabungkan data two shot
+                            for (const member of topTwoShots.topMembers) {
+                                if (!allTwoShots.topMembers[member.name]) {
+                                    allTwoShots.topMembers[member.name] = 0;
+                                }
+                                allTwoShots.topMembers[member.name] += member.tickets;
+                            }
+                            allTwoShots.totalTickets += topTwoShots.totalTickets;
             
                             // Gabungkan data top-up
                             allSpendTable = spendTable;
@@ -667,6 +782,16 @@ chrome.runtime.onMessage.addListener(
                                 return `${medal} ${name} - ${tickets} tiket`;
                             });
                         data.videoCall.totalTickets = allVideoCalls.totalTickets;
+
+                        //2s
+                        data.twoShot.topMembers = Object.entries(allTwoShots.topMembers)
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 3)
+                            .map(([name, tickets], index) => {
+                                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
+                                return `${medal} ${name} - ${tickets} tiket`;
+                            });
+                        data.twoShot.totalTickets = allTwoShots.totalTickets;
             
                         const byYear = extractAndSumValuesByYear(allSpendTable);
                         let totalTopup = 0;
@@ -680,14 +805,15 @@ chrome.runtime.onMessage.addListener(
                     } else {
                         // Jika tahun tertentu dipilih, proses data untuk tahun tersebut
                         const yearSelected = year;
-                        const [topSetlists, winLossData, topVideoCalls, profile, spendTable, myPej, lastEvent] = await Promise.all([
+                        const [topSetlists, winLossData, topVideoCalls, profile, spendTable, myPej, lastEvent, topTwoShots] = await Promise.all([
                             fetchTopSetlists(yearSelected),
                             calculateWinLossRate(yearSelected),
                             fetchTopVideoCallMembersByYear(yearSelected),
                             scrapeProfile(),
                             getAllTableData(),
                             myPage(),
-                            fetchTopThreeEventWins(yearSelected)
+                            fetchTopThreeEventWins(yearSelected),
+                            fetchTopTwoShotMembersByYear(yearSelected),
                         ]);
             
                         data.name = profile;
@@ -733,6 +859,18 @@ chrome.runtime.onMessage.addListener(
                             data.videoCall = "Belum pernah Video Call 😭";
                         }
 
+                        // Two Shot
+                        if (topTwoShots.topMembers.length !== 0) {
+                            data.twoShot.topMembers = topTwoShots.topMembers.slice(0, 3).map((member, index) => {
+                                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
+                                return `${medal} ${member.name} - ${member.tickets} tiket`;
+                            });
+
+                            data.twoShot.totalTickets = topTwoShots.totalTickets;
+                        } else {
+                            data.twoShot = "Belum pernah Two Shot 😭";
+                        }
+
                         // Top-up
                         const byYear = extractAndSumValuesByYear(spendTable);
                         if (byYear[yearSelected]) {
@@ -744,6 +882,7 @@ chrome.runtime.onMessage.addListener(
 
                         data.years = year;
                     }
+                    console.log(data)
                     res.json({ success: true, data });
                 } catch (error) {
                     console.error(error);
