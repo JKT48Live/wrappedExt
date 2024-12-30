@@ -882,7 +882,7 @@ chrome.runtime.onMessage.addListener(
 
                         data.years = year;
                     }
-                    console.log(data)
+                    
                     res.json({ success: true, data });
                 } catch (error) {
                     console.error(error);
