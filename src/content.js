@@ -24,15 +24,19 @@ chrome.runtime.onMessage.addListener(
                 for (let page = 1; page <= totalPages; page++) {
                     const tableData = await scrapeTableData(page).then(res => res);
                     tableData.forEach(row => {
-                        const year = parseInt(row[2].split(' ')[2]); // Extract year and convert to integer
+                        const year = parseInt(row[2].split(' ')[2]); 
                         uniqueYears.add(year);
-                        /*if (year >= 2022) { // Check if year is 2022 or later
-                            uniqueYears.add(year);
-                        }*/
                     });
                 }
 
-                return Array.from(uniqueYears);
+                const currentYear = new Date().getFullYear();
+                const maxYear = Math.max(...uniqueYears);
+
+                for (let y = maxYear + 1; y <= currentYear; y++) {
+                    uniqueYears.add(y);
+                }
+
+                return Array.from(uniqueYears).sort((a, b) => b - a);
             } catch (error) {
                 console.error("Error getAllYears:", error);
                 return false;
