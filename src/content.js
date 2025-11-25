@@ -276,28 +276,43 @@ chrome.runtime.onMessage.addListener(
                         const tableData = await scrapeTheaterTableData(page).then(res => res);
 
                         tableData.forEach(row => {
-                            //row 3 Hari/Tanggal
                             const entryYear = row[3].split(' ')[2];
-                            if (year && entryYear !== year.toString()) {
-                                return;
-                            }
+                            if (year && entryYear !== year.toString()) return;
 
                             const setlistName = row[2];
-                            const winStatus = row[0].startsWith('Detil') ? 1 : 0;
+                            const isWin = row[0].startsWith('Detil') ? 1 : 0;
 
                             if (!setlistCounts[setlistName]) {
-                                setlistCounts[setlistName] = { appearances: 0, wins: 0 };
+                                setlistCounts[setlistName] = {
+                                    appearances: 0,
+                                    wins: 0
+                                };
                             }
+
                             setlistCounts[setlistName].appearances++;
-                            setlistCounts[setlistName].wins += winStatus;
+                            setlistCounts[setlistName].wins += isWin;
                         });
                     }
 
-                    return Object.entries(setlistCounts)
-                        .filter(([name, count]) => count.wins > 0)
+                    const topByWins = Object.entries(setlistCounts)
+                        .filter(([n, c]) => c.wins > 0)
                         .sort((a, b) => b[1].wins - a[1].wins)
                         .slice(0, 3)
-                        .map(setlist => ({ name: setlist[0], wins: setlist[1].wins }));
+                        .map(item => ({ name: item[0], wins: item[1].wins }));
+
+                    const topByApply = Object.entries(setlistCounts)
+                        .sort((a, b) => b[1].appearances - a[1].appearances)
+                        .slice(0, 3)
+                        .map(item => ({
+                            name: item[0],
+                            appearances: item[1].appearances
+                        }));
+
+                    return {
+                        topByWins,
+                        topByApply
+                    };
+
                 } catch (error) {
                     console.error("Error fetchTopSetlists:", error);
                     return false;
@@ -702,7 +717,7 @@ chrome.runtime.onMessage.addListener(
             
                         for (const yr of years) {
 
-                            const [topSetlists, winLossData, topVideoCalls, profile, spendTable, myPej, lastEvent, topTwoShots] = await Promise.all([
+                            const [{ topByWins, topByApply }, winLossData, topVideoCalls, profile, spendTable, myPej, lastEvent, topTwoShots] = await Promise.all([
                                 fetchTopSetlists(yr),
                                 calculateWinLossRate(yr),
                                 fetchTopVideoCallMembersByYear(yr),
@@ -718,7 +733,11 @@ chrome.runtime.onMessage.addListener(
                             data.oshiPic = myPej.oshiPic;
 
                             // Gabungkan data setlists
-                            allSetlists = allSetlists.concat(topSetlists);
+                            allSetlists = allSetlists.concat(topByWins);
+
+                            // Gabungkan data setlist paling sering apply
+                            if (!allApplied) var allApplied = [];
+                            allApplied = allApplied.concat(topByApply);
             
                             // Tambahkan data win/loss
                             allWinLossData.wins += winLossData.wins;
@@ -765,6 +784,23 @@ chrome.runtime.onMessage.addListener(
                                 .map((setlist, index) => {
                                     const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
                                     return `${medal} ${setlist.name} - ${setlist.wins}x`;
+                                });
+
+                            data.theater.mostApplied = allApplied
+                                .reduce((acc, item) => {
+                                    const found = acc.find(x => x.name === item.name);
+                                    if (found) {
+                                        found.appearances += item.appearances;
+                                    } else {
+                                        acc.push(item);
+                                    }
+                                    return acc;
+                                }, [])
+                                .sort((a, b) => b.appearances - a.appearances)
+                                .slice(0, 3)
+                                .map((setlist, index) => {
+                                    const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
+                                    return `${medal} ${setlist.name} - ${setlist.appearances}x`;
                                 });
                         } else {
                             data.theater.topSetlists = "Belum pernah Theateran 😭";
@@ -825,7 +861,7 @@ chrome.runtime.onMessage.addListener(
                     } else {
                         // Jika tahun tertentu dipilih, proses data untuk tahun tersebut
                         const yearSelected = year;
-                        const [topSetlists, winLossData, topVideoCalls, profile, spendTable, myPej, lastEvent, topTwoShots] = await Promise.all([
+                        const [{ topByWins, topByApply }, winLossData, topVideoCalls, profile, spendTable, myPej, lastEvent, topTwoShots] = await Promise.all([
                             fetchTopSetlists(yearSelected),
                             calculateWinLossRate(yearSelected),
                             fetchTopVideoCallMembersByYear(yearSelected),
@@ -841,14 +877,23 @@ chrome.runtime.onMessage.addListener(
                         data.oshiPic = myPej.oshiPic;
 
                         // Theater
-                        if (topSetlists.length !== 0) {
+                        if (topByWins.length !== 0) {
                             // Menambahkan Top 3 Setlist
-                            data.theater.topSetlists = topSetlists.slice(0, 3).map((setlist, index) => {
+                            data.theater.topSetlists = topByWins.slice(0, 3).map((setlist, index) => {
                                 const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
                                 return `${medal} ${setlist.name} - ${setlist.wins}x`;
                             });
                         } else {
                             data.theater.topSetlists = "Belum pernah Theateran 😭";
+                        }
+
+                        if (topByApply.length !== 0) {
+                            data.theater.mostApplied = topByApply.slice(0, 3).map((setlist, index) => {
+                                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
+                                return `${medal} ${setlist.name} - ${setlist.appearances}x`;
+                            });
+                        } else {
+                            data.theater.mostApplied = "Belum pernah Apply Theater 😭";
                         }
 
                         // Menambahkan Winrate data
