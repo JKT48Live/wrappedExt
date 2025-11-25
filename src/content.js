@@ -92,7 +92,6 @@ chrome.runtime.onMessage.addListener(
                 console.error('Error:', error);
                 sendResponse({ success: false, message: "Terjadi kesalahan pada server" });
             });
-            //sendResponse({ data: getData() });
             return true;
         }
         if (request?.action === 'scrap') {
