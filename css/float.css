@@ -1,0 +1,24 @@
+#wrappedFloatBtn {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  background: #ff4081;
+  color: white;
+  padding: 10px 15px;
+  border-radius: 50px;
+  cursor: pointer;
+  z-index: 999999999;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  font-size: 14px;
+}
+
+#wrappedPanel {
+  position: fixed;
+  top: 70px;
+  right: 20px;
+  width: 200px;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+  z-index: 999999999;
+}
