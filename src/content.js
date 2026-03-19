@@ -1,15 +1,501 @@
+let originalMemberHTML = "";
+const originalMemberHTMLByUrl = new Map();
+let teamSortEnabled = true;
+let lastMemberViewUrl = window.location.href;
+let memberRouteRefreshTimer = null;
+const WRAPPED_MEMBER_GRID_ATTR = 'data-wrapped-member-grid';
+const WRAPPED_TEAM_SECTION_ATTR = 'data-wrapped-team-sections';
+
+function isMemberPage() {
+    return window.location.pathname === "/member";
+}
+
+function isSortableMemberPage() {
+    const memberType = new URLSearchParams(window.location.search).get('type');
+    return isMemberPage() && memberType !== 'TRAINEE';
+}
+
+function getMemberGridContainer() {
+    const taggedGrid = document.querySelector(`[${WRAPPED_MEMBER_GRID_ATTR}="true"]`);
+    if (taggedGrid) {
+        return taggedGrid;
+    }
+
+    const firstMemberCard = document.querySelector('a.member-card');
+    if (!firstMemberCard) {
+        return null;
+    }
+
+    const memberGrid = firstMemberCard.parentElement;
+    if (memberGrid) {
+        memberGrid.setAttribute(WRAPPED_MEMBER_GRID_ATTR, 'true');
+    }
+
+    return memberGrid;
+}
+
+function scheduleMemberSortRefresh() {
+    if (!isSortableMemberPage() || !teamSortEnabled) {
+        return;
+    }
+
+    if (memberRouteRefreshTimer) {
+        clearTimeout(memberRouteRefreshTimer);
+    }
+
+    memberRouteRefreshTimer = setTimeout(() => {
+        handleSortLogic(true);
+    }, 250);
+}
+
+function isSortedMemberGrid(memberGrid) {
+    return memberGrid?.getAttribute(WRAPPED_TEAM_SECTION_ATTR) === 'true';
+}
+
+function captureOriginalMemberHTML(memberGrid, force = false) {
+    if (!memberGrid) {
+        return;
+    }
+
+    if (!force && isSortedMemberGrid(memberGrid)) {
+        return;
+    }
+
+    const hasMemberCards = memberGrid.querySelector('a.member-card');
+    if (!hasMemberCards) {
+        return;
+    }
+
+    originalMemberHTML = memberGrid.innerHTML;
+    originalMemberHTMLByUrl.set(window.location.href, originalMemberHTML);
+}
+
+function getOriginalMemberHTMLForCurrentView() {
+    return originalMemberHTMLByUrl.get(window.location.href) || originalMemberHTML || '';
+}
+
+function normalizeMemberCardElements(root) {
+    if (!root) {
+        return;
+    }
+
+    root.querySelectorAll('.member-card-inner').forEach(card => {
+        card.style.opacity = '1';
+        card.style.transform = 'translate(0px, 0px)';
+        card.style.translate = 'none';
+        card.style.rotate = 'none';
+        card.style.scale = 'none';
+    });
+
+    root.querySelectorAll('.member-card').forEach(card => {
+        card.classList.add('aos-animate');
+    });
+}
+
+async function handleSortLogic(isEnabled) {
+    const memberGrid = getMemberGridContainer();
+    if (!memberGrid) return;
+
+    if (isEnabled) {
+        if (!originalMemberHTML || originalMemberHTML.trim() === "" || !isSortedMemberGrid(memberGrid)) {
+            captureOriginalMemberHTML(memberGrid);
+        }
+        await applyTeamSort();
+    } else {
+        memberGrid.removeAttribute(WRAPPED_TEAM_SECTION_ATTR);
+        const originalHTML = getOriginalMemberHTMLForCurrentView();
+        if (originalHTML) {
+            memberGrid.innerHTML = originalHTML;
+            normalizeMemberCardElements(memberGrid);
+            window.scrollTo(0, 0);
+            console.log("Tampilan dikembalikan ke semula.");
+        } else {
+            console.warn("Restore dibatalkan karena snapshot member asli belum tersedia.");
+        }
+    }
+}
+
+window.addEventListener("DO_TEAM_SORT", (e) => {
+    teamSortEnabled = Boolean(e.detail.status);
+    handleSortLogic(e.detail.status);
+});
+
+if (isMemberPage()) {
+    const checkExist = setInterval(() => {
+        const memberGrid = getMemberGridContainer();
+        if (memberGrid) {
+            if (isSortableMemberPage()) {
+                handleSortLogic(true);
+            }
+            clearInterval(checkExist);
+        }
+    }, 100);
+}
+
+function handleMemberRouteChange() {
+    if (window.location.href === lastMemberViewUrl) {
+        return;
+    }
+
+    lastMemberViewUrl = window.location.href;
+
+    if (!isMemberPage()) {
+        originalMemberHTML = "";
+        return;
+    }
+
+    if (!isSortableMemberPage()) {
+        return;
+    }
+
+    const memberGrid = getMemberGridContainer();
+    if (memberGrid && !isSortedMemberGrid(memberGrid)) {
+        captureOriginalMemberHTML(memberGrid, true);
+    }
+
+    scheduleMemberSortRefresh();
+}
+
+window.addEventListener("popstate", handleMemberRouteChange);
+
+const originalContentPushState = history.pushState;
+history.pushState = function (...args) {
+    const result = originalContentPushState.apply(this, args);
+    handleMemberRouteChange();
+    return result;
+};
+
+const originalContentReplaceState = history.replaceState;
+history.replaceState = function (...args) {
+    const result = originalContentReplaceState.apply(this, args);
+    handleMemberRouteChange();
+    return result;
+};
+
+const memberPageObserver = new MutationObserver(() => {
+    if (!isSortableMemberPage() || !teamSortEnabled) {
+        return;
+    }
+
+    const memberGrid = getMemberGridContainer();
+    if (!memberGrid) {
+        return;
+    }
+
+    const hasSortedSections = memberGrid.getAttribute(WRAPPED_TEAM_SECTION_ATTR) === 'true';
+    if (!hasSortedSections && window.location.href === lastMemberViewUrl) {
+        captureOriginalMemberHTML(memberGrid, true);
+        scheduleMemberSortRefresh();
+    }
+});
+
+memberPageObserver.observe(document.documentElement, {
+    childList: true,
+    subtree: true
+});
+
 chrome.runtime.onMessage.addListener(
     function (request, sender, sendResponse) {
+        const API_BASE_URL = 'https://jkt48.com/api/v1/accounts';
+        let cachedAuthToken = null;
+        let cachedMembersPromise = null;
+        const DEFAULT_MEMBER_IMAGE = 'https://jkt48.com/images/no-image-2.png';
+
+        function extractJwtCandidatesFromValue(value, bucket = []) {
+            if (!value) return bucket;
+
+            if (typeof value === 'string') {
+                const jwtMatches = value.match(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+/g);
+                if (jwtMatches) {
+                    bucket.push(...jwtMatches);
+                }
+
+                try {
+                    const parsed = JSON.parse(value);
+                    extractJwtCandidatesFromValue(parsed, bucket);
+                } catch (_) {
+                    // Ignore non-JSON strings.
+                }
+
+                return bucket;
+            }
+
+            if (Array.isArray(value)) {
+                value.forEach(item => extractJwtCandidatesFromValue(item, bucket));
+                return bucket;
+            }
+
+            if (typeof value === 'object') {
+                Object.values(value).forEach(item => extractJwtCandidatesFromValue(item, bucket));
+            }
+
+            return bucket;
+        }
+
+        async function getAuthToken() {
+            if (cachedAuthToken) {
+                return cachedAuthToken;
+            }
+
+            const candidateValues = [];
+
+            try {
+                const sessionResponse = await fetch('https://jkt48.com/api/auth/session', {
+                    credentials: 'include',
+                    headers: {
+                        'accept': 'application/json, text/plain, */*'
+                    }
+                });
+
+                if (sessionResponse.ok) {
+                    const sessionJson = await sessionResponse.json();
+                    candidateValues.push(sessionJson);
+                }
+            } catch (error) {
+                // Some page contexts cannot access the NextAuth session endpoint reliably.
+                // This is only a best-effort token source, so fail silently and continue
+                // with other sources like localStorage/sessionStorage.
+            }
+
+            try {
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    if (key) {
+                        candidateValues.push(localStorage.getItem(key));
+                    }
+                }
+            } catch (error) {
+                console.warn('Unable to read localStorage:', error);
+            }
+
+            try {
+                for (let i = 0; i < sessionStorage.length; i++) {
+                    const key = sessionStorage.key(i);
+                    if (key) {
+                        candidateValues.push(sessionStorage.getItem(key));
+                    }
+                }
+            } catch (error) {
+                console.warn('Unable to read sessionStorage:', error);
+            }
+
+            const jwtCandidates = extractJwtCandidatesFromValue(candidateValues);
+            cachedAuthToken = jwtCandidates.find(token => token.split('.').length === 3) || null;
+            return cachedAuthToken;
+        }
+
+        async function hasActiveSession() {
+            try {
+                const sessionResponse = await fetch('https://jkt48.com/api/auth/session', {
+                    credentials: 'include',
+                    headers: {
+                        'accept': 'application/json, text/plain, */*'
+                    }
+                });
+
+                if (!sessionResponse.ok) {
+                    return false;
+                }
+
+                const sessionJson = await sessionResponse.json();
+                const jwtCandidates = extractJwtCandidatesFromValue(sessionJson);
+                return Boolean(sessionJson?.user || sessionJson?.expires || jwtCandidates.length > 0);
+            } catch (_) {
+                return false;
+            }
+        }
+
+        async function fetchApiJson(path, page = null) {
+            const url = new URL(`${API_BASE_URL}/${path}`);
+            url.searchParams.set('lang', 'id');
+
+            if (page !== null) {
+                url.searchParams.set('page', page);
+            }
+
+            const authToken = await getAuthToken();
+            const headers = {
+                'accept': 'application/json, text/plain, */*'
+            };
+
+            if (authToken) {
+                headers.authorization = `Bearer ${authToken}`;
+            }
+
+            const response = await fetch(url.toString(), {
+                credentials: 'include',
+                headers
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! Status: ${response.status} (${path})${authToken ? '' : ' - bearer token not found'}`);
+            }
+
+            return response.json();
+        }
+
+        async function fetchApiJsonWithRetry(path, page = null, retries = 2) {
+            let lastError = null;
+
+            for (let attempt = 0; attempt <= retries; attempt++) {
+                try {
+                    if (attempt > 0) {
+                        cachedAuthToken = null;
+                        await new Promise(resolve => setTimeout(resolve, 500 * attempt));
+                    }
+
+                    return await fetchApiJson(path, page);
+                } catch (error) {
+                    lastError = error;
+                    const isNetworkError = error instanceof TypeError || /Failed to fetch/i.test(error?.message || '');
+                    if (!isNetworkError || attempt === retries) {
+                        throw error;
+                    }
+                    console.warn(`Retrying ${path}${page !== null ? ` page ${page}` : ''} after fetch failure (attempt ${attempt + 1}/${retries + 1})`, error);
+                }
+            }
+
+            throw lastError;
+        }
+
+        async function fetchPurchaseHistoryPage(page) {
+            const json = await fetchApiJsonWithRetry('purchase-history', page);
+            return {
+                items: Array.isArray(json?.data) ? json.data : [],
+                meta: json?._meta || {}
+            };
+        }
+
+        async function fetchAllPurchaseHistory() {
+            try {
+                const firstPage = await fetchPurchaseHistoryPage(1);
+                const totalPages = parseInt(firstPage.meta?.total_page, 10) || 1;
+                let allData = firstPage.items;
+
+                for (let page = 2; page <= totalPages; page++) {
+                    try {
+                        const nextPage = await fetchPurchaseHistoryPage(page);
+                        allData = allData.concat(nextPage.items);
+                    } catch (error) {
+                        console.error(`Error fetching purchase history page ${page}:`, error);
+                        break;
+                    }
+                }
+
+                return allData;
+            } catch (error) {
+                console.error('Error fetchAllPurchaseHistory:', error);
+                return [];
+            }
+        }
+
+        async function fetchUserProfile() {
+            try {
+                const json = await fetchApiJsonWithRetry('user');
+                return json?.data || null;
+            } catch (error) {
+                console.error('Error fetchUserProfile:', error);
+                return null;
+            }
+        }
+
+        function formatMembershipDate(dateString) {
+            if (!dateString) {
+                return '';
+            }
+
+            const date = new Date(dateString);
+            if (Number.isNaN(date.getTime())) {
+                return '';
+            }
+
+            return date.toLocaleDateString('id-ID', {
+                day: 'numeric',
+                month: 'long',
+                year: 'numeric'
+            });
+        }
+
+        function getMembershipDuration(dateString) {
+            if (!dateString) {
+                return '';
+            }
+
+            const startDate = new Date(dateString);
+            const now = new Date();
+
+            if (Number.isNaN(startDate.getTime()) || startDate > now) {
+                return '';
+            }
+
+            let years = now.getFullYear() - startDate.getFullYear();
+            let months = now.getMonth() - startDate.getMonth();
+            let days = now.getDate() - startDate.getDate();
+
+            if (days < 0) {
+                months -= 1;
+                days += new Date(now.getFullYear(), now.getMonth(), 0).getDate();
+            }
+
+            if (months < 0) {
+                years -= 1;
+                months += 12;
+            }
+
+            if (years > 0) {
+                return `${years} tahun`;
+            }
+
+            if (months > 0) {
+                return `${months} bulan`;
+            }
+
+            return `${Math.max(days, 0)} hari`;
+        }
+
+        async function fetchAllMembers() {
+            if (cachedMembersPromise) {
+                return cachedMembersPromise;
+            }
+
+            cachedMembersPromise = (async () => {
+                try {
+                    const response = await fetch('https://jkt48.com/api/v1/members?lang=id', {
+                        credentials: 'include',
+                        headers: {
+                            'accept': 'application/json, text/plain, */*'
+                        }
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! Status: ${response.status} (members)`);
+                    }
+
+                    const json = await response.json();
+                    return Array.isArray(json?.data) ? json.data : [];
+                } catch (error) {
+                    console.error('Error fetchAllMembers:', error);
+                    return [];
+                }
+            })();
+
+            return cachedMembersPromise;
+        }
+
+        async function getOshiPhotoById(oshimenId) {
+            if (!oshimenId) {
+                return DEFAULT_MEMBER_IMAGE;
+            }
+
+            const members = await fetchAllMembers();
+            const matchedMember = members.find(member => Number(member?.jkt48_member_id) === Number(oshimenId));
+            return matchedMember?.photo || DEFAULT_MEMBER_IMAGE;
+        }
+
         const getTotalPages = async () => {
             try {
-                const response = await fetch('https://jkt48.com/mypage/point-history?page=1&lang=id');
-                const text = await response.text();
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(text, "text/html");
-                const totalPagesElement = doc.querySelector('.page');
-                const totalPagesString = totalPagesElement ? totalPagesElement.textContent.split('/').pop().trim() : "";
-                const totalPages = parseInt(totalPagesString, 10) || 0;
-                return totalPages;
+                const { meta } = await fetchPurchaseHistoryPage(1);
+                return parseInt(meta?.total_page, 10) || 0;
             } catch (error) {
                 console.error('Error fetching getTotalPages total pages:', error);
                 return 0;
@@ -24,13 +510,21 @@ chrome.runtime.onMessage.addListener(
                 for (let page = 1; page <= totalPages; page++) {
                     const tableData = await scrapeTableData(page).then(res => res);
                     tableData.forEach(row => {
-                        const year = parseInt(row[2].split(' ')[2]); 
+                        const year = row?.createdYear;
                         uniqueYears.add(year);
                     });
                 }
 
+                uniqueYears.delete(undefined);
+                uniqueYears.delete(null);
+                uniqueYears.delete(NaN);
+
                 const currentYear = new Date().getFullYear();
-                const maxYear = Math.max(...uniqueYears);
+                const yearsArray = Array.from(uniqueYears);
+                if (yearsArray.length === 0) {
+                    return [currentYear];
+                }
+                const maxYear = yearsArray.length ? Math.max(...yearsArray) : currentYear;
 
                 for (let y = maxYear + 1; y <= currentYear; y++) {
                     uniqueYears.add(y);
@@ -45,28 +539,12 @@ chrome.runtime.onMessage.addListener(
 
         async function scrapeTableData(page) {
             try {
-                const url = new URL('https://jkt48.com/mypage/point-history');
-                url.searchParams.append('page', page);
-                url.searchParams.append('lang', 'id');
+                const { items } = await fetchPurchaseHistoryPage(page);
 
-                const response = await fetch(url.toString());
-
-                if (!response.ok) {
-                    throw new Error(`HTTP error! Status: ${response.status}`);
-                }
-
-                const text = await response.text();
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(text, 'text/html');
-                const tableRows = doc.querySelectorAll('.table tbody tr');
-                let tableData = [];
-
-                tableRows.forEach(row => {
-                    const rowData = Array.from(row.querySelectorAll('td')).map(td => td.textContent.trim());
-                    tableData.push(rowData);
-                });
-
-                return tableData;
+                return items.map(item => ({
+                    ...item,
+                    createdYear: item?.created_date ? new Date(item.created_date).getFullYear() : null
+                }));
             } catch (error) {
                 console.error(`Error fetching data from page ${page}:`, error);
                 return [];
@@ -76,13 +554,18 @@ chrome.runtime.onMessage.addListener(
         if (request?.action === 'login') {
             async function login() {
                 try {
+                    const sessionActive = await hasActiveSession();
+                    if (!sessionActive) {
+                        return { success: false, sessionActive: false, message: "Sesi login tidak aktif" };
+                    }
+
                     const years = await getAllYears();
                     const yrs = years.map(year => ({ year }));
 
-                    return { success: true, data: yrs };
+                    return { success: true, sessionActive: true, data: yrs };
                 } catch (error) {
                     console.error(error);
-                    return { success: false, message: "Terjadi kesalahan pada server" };
+                    return { success: false, sessionActive: true, message: "Terjadi kesalahan pada server" };
                 }
             }
 
@@ -94,18 +577,18 @@ chrome.runtime.onMessage.addListener(
             });
             return true;
         }
+        if (request?.action === 'check_session') {
+            hasActiveSession().then(isActive => {
+                sendResponse({ success: true, active: isActive });
+            }).catch(() => {
+                sendResponse({ success: true, active: false });
+            });
+            return true;
+        }
         if (request?.action === 'scrap') {
             async function getAllTableData() {
                 try {
-                    const totalPages = await getTotalPages().then(res => res);
-                    let allData = [];
-
-                    for (let page = 1; page <= totalPages; page++) {
-                        const pageData = await scrapeTableData(page).then(res => res);
-                        allData = allData.concat(pageData);
-                    }
-
-                    return allData;
+                    return await fetchAllPurchaseHistory();
                 } catch (error) {
                     console.error("Error getAllTableData:", error);
                     return false;
@@ -115,16 +598,24 @@ chrome.runtime.onMessage.addListener(
             function extractAndSumValuesByYear(data) {
                 let yearSummary = {};
 
-                data.forEach(row => {
-                    const date = row[2]; // Tanggal Perubahan
-                    const year = date.split(' ')[2]; // Asumsi format tanggal adalah 'dd MM yyyy'
-                    const usage = row[3]; // Tujuan Pemakaian
-                    const changeColumn = row[5];
-                    const bonusMatch = changeColumn.match(/Bonus: ([0-9-+,]+)/);
-                    const pointMatch = changeColumn.match(/Buy: ([0-9-+,]+)/);
+                data.forEach(transaction => {
+                    const year = transaction?.created_date ? new Date(transaction.created_date).getFullYear() : null;
+                    if (!year) return;
 
-                    let bonus = bonusMatch ? parseInt(bonusMatch[1].replace(/[+,]/g, ''), 10) : 0;
-                    let point = pointMatch ? parseInt(pointMatch[1].replace(/[+,]/g, ''), 10) : 0;
+                    const isTopUp = transaction?.type === 'JKT48POINT';
+                    const isPointSpend = transaction?.payment_method_name === 'JKT48 Point';
+                    const usage = isTopUp ? 'JKT48 Points' : (transaction?.title || transaction?.type || 'Lainnya');
+
+                    let bonus = 0;
+                    let point = 0;
+
+                    if (isTopUp) {
+                        point = Number(transaction?.total_quantity ?? transaction?.total_amount ?? 0);
+                    } else if (isPointSpend) {
+                        point = -Math.abs(Number(transaction?.payment_amount ?? transaction?.total_amount ?? 0));
+                    } else {
+                        return;
+                    }
 
                     if (!yearSummary[year]) {
                         yearSummary[year] = { summary: {}, totalBonus: 0, totalPoints: 0 };
@@ -145,50 +636,31 @@ chrome.runtime.onMessage.addListener(
 
             async function myPage() {
                 try {
-                    const response = await fetch('https://jkt48.com/mypage');
-
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    const profile = await fetchUserProfile();
+                    if (!profile) {
+                        return false;
                     }
 
-                    const text = await response.text();
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(text, 'text/html');
-
-                    // Oshi
-                    const oshiElement = Array.from(doc.querySelectorAll('.entry-mypage__item--subject')).find(element =>
-                        element.textContent.includes("Anggota yang paling disukai")
-                    );
-                    const oshiText = oshiElement ? oshiElement.nextElementSibling.textContent.trim() : '';
-                    const oshi = (oshiText === "Silahkan pilih anggota yang paling disukai") ? "<s>Tidak ada</s> / 1 Jeketi" : oshiText;
-
-                    // Foto Oshi
-                    const oshiPic = "https://jkt48.com" + doc.querySelector('.entry-mypage__profile img').getAttribute('src') || 'No Image Found';
-
-                    // Mencari jumlah kedatangan teater
-                    const teaterKedatanganText = Array.from(doc.querySelectorAll('.entry-mypage__item--subject')).find(element =>
-                        element.textContent.includes("Jumlah kedatangan teater")
-                    )?.nextElementSibling.textContent.trim();
-                    const teaterKedatangan = teaterKedatanganText ? teaterKedatanganText.match(/[\d,]+/)[0] : '';
-
-                    // Mencari jumlah JKT48 Points
-                    const jkt48PointsText = Array.from(doc.querySelectorAll('.entry-mypage__item--subject')).find(element =>
-                        element.textContent.includes("Jumlah JKT48 Points")
-                    )?.nextElementSibling.textContent;
-                    const jkt48Points = jkt48PointsText ? jkt48PointsText.match(/[\d,]+/)[0].replace(/,/g, '') : '';
-
-                    // Mencari Bonus Points
-                    const bonusPointsText = Array.from(doc.querySelectorAll('.entry-mypage__item--subject')).find(element =>
-                        element.textContent.includes("Bonus Points")
-                    )?.nextElementSibling.textContent;
-                    const bonusPoints = bonusPointsText ? bonusPointsText.match(/[\d,]+/)[0].replace(/,/g, '') : '';
+                    const oshi = profile.oshimen_name || "<s>Tidak ada</s> / 1 Jeketi";
+                    const oshiPic = await getOshiPhotoById(profile.oshimen_id);
+                    const userPic = profile.profile_picture || DEFAULT_MEMBER_IMAGE;
+                    const memberSince = formatMembershipDate(profile.created_date);
+                    const memberDuration = getMembershipDuration(profile.created_date);
+                    const isOfc = Number(profile.is_ofc) === 1;
+                    const teaterKedatangan = '';
+                    const jkt48Points = '';
+                    const bonusPoints = '';
 
                     return {
                         oshi,
+                        userPic,
                         teaterKedatangan,
                         jkt48Points,
                         bonusPoints,
-                        oshiPic
+                        oshiPic,
+                        memberSince,
+                        memberDuration,
+                        isOfc
                     };
                 } catch (error) {
                     console.error("Error myPage:", error);
@@ -198,103 +670,175 @@ chrome.runtime.onMessage.addListener(
 
             async function scrapeProfile() {
                 try {
-                    const response = await fetch('https://jkt48.com/change/form?lang=id');
-
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! Status: ${response.status}`);
-                    }
-
-                    const text = await response.text();
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(text, 'text/html');
-
-                    const nickname = doc.getElementById('nickname').value;
-                    return nickname;
+                    const profile = await fetchUserProfile();
+                    return profile?.nickname || profile?.full_name || null;
                 } catch (error) {
                     console.error('Error fetching data from profile page:', error);
                     return null;
                 }
             }
 
-            const getTheaterTotalPages = async () => {
-                try {
-                    const response = await fetch('https://jkt48.com/mypage/ticket-list?page=1&lang=id');
+            function getHistoryDateRange() {
+                const today = new Date();
+                return {
+                    from: '2011-11-02',
+                    to: `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+                };
+            }
 
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! Status: ${response.status}`);
-                    }
+            let cachedMyTicketsPromise = null;
 
-                    const text = await response.text();
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(text, 'text/html');
+            async function fetchMyTicketsPage(page) {
+                const { from, to } = getHistoryDateRange();
+                const url = new URL(`${API_BASE_URL}/my-tickets`);
+                url.searchParams.set('lang', 'id');
+                url.searchParams.set('limit', '1000');
+                url.searchParams.set('page', page);
+                url.searchParams.set('from', from);
+                url.searchParams.set('to', to);
 
-                    const totalPagesElement = doc.querySelector('.page');
-                    const totalPagesString = totalPagesElement ? totalPagesElement.textContent.split('/').pop().trim() : "";
-                    const totalPages = parseInt(totalPagesString, 10) || 0;
+                const authToken = await getAuthToken();
+                const headers = { 'accept': 'application/json, text/plain, */*' };
 
-                    return totalPages;
-                } catch (error) {
-                    console.error('Error fetching getTheaterTotalPages total pages:', error);
-                    return 0;
+                if (authToken) {
+                    headers.authorization = `Bearer ${authToken}`;
                 }
-            };
 
-            async function scrapeTheaterTableData(page) {
+                const response = await fetch(url.toString(), {
+                    credentials: 'include',
+                    headers
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status} (my-tickets)${authToken ? '' : ' - bearer token not found'}`);
+                }
+
+                const json = await response.json();
+                return {
+                    items: Array.isArray(json?.data) ? json.data : [],
+                    meta: json?._meta || {}
+                };
+            }
+
+            async function fetchMyTicketsPageWithRetry(page, retries = 2) {
+                let lastError = null;
+
+                for (let attempt = 0; attempt <= retries; attempt++) {
+                    try {
+                        if (attempt > 0) {
+                            cachedAuthToken = null;
+                            await new Promise(resolve => setTimeout(resolve, 500 * attempt));
+                        }
+
+                        return await fetchMyTicketsPage(page);
+                    } catch (error) {
+                        lastError = error;
+                        const isNetworkError = error instanceof TypeError || /Failed to fetch/i.test(error?.message || '');
+                        if (!isNetworkError || attempt === retries) {
+                            throw error;
+                        }
+                        console.warn(`Retrying my-tickets page ${page} after fetch failure (attempt ${attempt + 1}/${retries + 1})`, error);
+                    }
+                }
+
+                throw lastError;
+            }
+
+            async function fetchAllMyTickets() {
+                if (cachedMyTicketsPromise) {
+                    return cachedMyTicketsPromise;
+                }
+
+                cachedMyTicketsPromise = (async () => {
                 try {
-                    const response = await fetch(`https://jkt48.com/mypage/ticket-list?page=${page}&lang=id`);
+                    const firstPage = await fetchMyTicketsPageWithRetry(1);
+                    const totalPages = parseInt(firstPage.meta?.total_page, 10) || 1;
+                    let allTickets = firstPage.items;
 
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    for (let page = 2; page <= totalPages; page++) {
+                        try {
+                            const nextPage = await fetchMyTicketsPageWithRetry(page);
+                            allTickets = allTickets.concat(nextPage.items);
+                        } catch (error) {
+                            console.error(`Error fetching my-tickets page ${page}:`, error);
+                            break;
+                        }
                     }
 
-                    const text = await response.text();
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(text, 'text/html');
-
-                    const tableRows = doc.querySelectorAll('.table tbody tr');
-                    let tableData = [];
-
-                    tableRows.forEach(row => {
-                        const rowData = Array.from(row.querySelectorAll('td')).map(td => td.textContent.trim());
-                        tableData.push(rowData);
-                    });
-
-                    return tableData;
+                    return allTickets;
                 } catch (error) {
-                    console.error(`Error fetching data from theater page ${page}:`, error);
+                    console.error('Error fetchAllMyTickets:', error);
                     return [];
                 }
+                })();
+
+                return cachedMyTicketsPromise;
+            }
+
+            function normalizeTransactionNumber(item) {
+                return item?.transaction_numbers?.[0] || item?.reference_code || item?.name || JSON.stringify(item);
+            }
+
+            function getTicketYear(item) {
+                const sourceDate = item?.date || item?.expired_date;
+                return sourceDate ? new Date(sourceDate).getFullYear() : null;
+            }
+
+            function getTicketDate(item) {
+                return item?.date || item?.expired_date || null;
+            }
+
+            function groupShowTickets(tickets, year = null) {
+                const filtered = tickets.filter(item => {
+                    if (item?.ticket_type !== 'SHOW') return false;
+                    const itemYear = getTicketYear(item);
+                    return year ? itemYear === Number(year) : true;
+                });
+
+                const grouped = new Map();
+
+                filtered.forEach(item => {
+                    const key = normalizeTransactionNumber(item);
+                    if (!grouped.has(key)) {
+                        grouped.set(key, []);
+                    }
+                    grouped.get(key).push(item);
+                });
+
+                return Array.from(grouped.values()).map(items => {
+                    const sample = items[0];
+                    const hasLose = items.some(item => item?.raffle_status === 'LOSE');
+                    const usedCount = items.reduce((max, item) => Math.max(max, Number(item?.used_count || 0)), 0);
+                    const isWin = !hasLose && (usedCount > 0 || items.length === 1);
+
+                    return {
+                        name: sample?.ticket_label || sample?.name || 'Unknown Show',
+                        date: getTicketDate(sample),
+                        isWin,
+                        isLoss: hasLose
+                    };
+                });
             }
 
             async function fetchTopSetlists(year = null) {
                 try {
-                    const totalPages = await getTheaterTotalPages().then(res => res);
+                    const tickets = await fetchAllMyTickets();
+                    const showGroups = groupShowTickets(tickets, year);
                     let setlistCounts = {};
 
-                    for (let page = 1; page <= totalPages; page++) {
-                        const tableData = await scrapeTheaterTableData(page).then(res => res);
+                    showGroups.forEach(item => {
+                        if (!setlistCounts[item.name]) {
+                            setlistCounts[item.name] = { appearances: 0, wins: 0 };
+                        }
 
-                        tableData.forEach(row => {
-                            const entryYear = row[3].split(' ')[2];
-                            if (year && entryYear !== year.toString()) return;
-
-                            const setlistName = row[2];
-                            const isWin = row[0].startsWith('Detil') ? 1 : 0;
-
-                            if (!setlistCounts[setlistName]) {
-                                setlistCounts[setlistName] = {
-                                    appearances: 0,
-                                    wins: 0
-                                };
-                            }
-
-                            setlistCounts[setlistName].appearances++;
-                            setlistCounts[setlistName].wins += isWin;
-                        });
-                    }
+                        setlistCounts[item.name].appearances++;
+                        if (item.isWin) {
+                            setlistCounts[item.name].wins++;
+                        }
+                    });
 
                     const topByWins = Object.entries(setlistCounts)
-                        .filter(([n, c]) => c.wins > 0)
+                        .filter(([_, count]) => count.wins > 0)
                         .sort((a, b) => b[1].wins - a[1].wins)
                         .slice(0, 3)
                         .map(item => ({ name: item[0], wins: item[1].wins }));
@@ -302,45 +846,29 @@ chrome.runtime.onMessage.addListener(
                     const topByApply = Object.entries(setlistCounts)
                         .sort((a, b) => b[1].appearances - a[1].appearances)
                         .slice(0, 3)
-                        .map(item => ({
-                            name: item[0],
-                            appearances: item[1].appearances
-                        }));
+                        .map(item => ({ name: item[0], appearances: item[1].appearances }));
 
-                    return {
-                        topByWins,
-                        topByApply
-                    };
-
+                    return { topByWins, topByApply };
                 } catch (error) {
                     console.error("Error fetchTopSetlists:", error);
-                    return false;
+                    return { topByWins: [], topByApply: [] };
                 }
             }
 
             async function calculateWinLossRate(year = null) {
                 try {
+                    const tickets = await fetchAllMyTickets();
+                    const showGroups = groupShowTickets(tickets, year);
                     let wins = 0;
                     let losses = 0;
-                    const totalPages = await getTheaterTotalPages().then(res => res);
 
-                    for (let page = 1; page <= totalPages; page++) {
-                        const tableData = await scrapeTheaterTableData(page).then(res => res);
-
-                        tableData.forEach(row => {
-                            //row 3 Hari/Tanggal
-                            const entryYear = row[3].split(' ')[2]; // Assuming '15 November 2023' format
-                            if (year && entryYear !== year.toString()) {
-                                return;
-                            }
-
-                            if (row[0].startsWith('Detil')) {
-                                wins++;
-                            } else if (row[0] === 'Kalah') {
-                                losses++;
-                            }
-                        });
-                    }
+                    showGroups.forEach(item => {
+                        if (item.isWin) {
+                            wins++;
+                        } else if (item.isLoss) {
+                            losses++;
+                        }
+                    });
 
                     const totalGames = wins + losses;
                     const winRate = totalGames > 0 ? (wins / totalGames) * 100 : 0;
@@ -353,192 +881,94 @@ chrome.runtime.onMessage.addListener(
                     };
                 } catch (error) {
                     console.error("Error calculateWinLossRate:", error);
-                    return false;
+                    return { year: year || 'All Time', wins: 0, losses: 0, winRate: '0.00%' };
                 }
             }
 
-            const getEventTotalPages = async () => {
-                try {
-                    const response = await fetch('https://jkt48.com/mypage/event-list?page=1&lang=id');
-
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! Status: ${response.status}`);
-                    }
-
-                    const text = await response.text();
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(text, 'text/html');
-
-                    const totalPagesElement = doc.querySelector('.page');
-                    const totalPagesString = totalPagesElement ? totalPagesElement.textContent.split('/').pop().trim() : "";
-                    const totalPages = parseInt(totalPagesString, 10) || 0;
-
-                    return totalPages;
-                } catch (error) {
-                    console.error('Error fetching getEventTotalPages:', error);
-                    return 0;
-                }
-            };
-
-            async function scrapeEventListData(page) {
-                try {
-                    const response = await fetch(`https://jkt48.com/mypage/event-list?page=${page}&lang=id`);
-
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! Status: ${response.status}`);
-                    }
-
-                    const text = await response.text();
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(text, 'text/html');
-
-                    const tableRows = doc.querySelectorAll('.table tbody tr');
-                    let tableData = [];
-
-                    tableRows.forEach(row => {
-                        const rowData = Array.from(row.querySelectorAll('td')).map(td => td.textContent.trim());
-                        tableData.push(rowData);
-                    });
-
-                    return tableData;
-                } catch (error) {
-                    console.error(`Error fetching data from event page ${page}:`, error);
-                    return [];
-                }
+            function filterTicketsByYearAndType(tickets, type, year = null) {
+                return tickets.filter(item => {
+                    if (item?.ticket_type !== type) return false;
+                    const itemYear = getTicketYear(item);
+                    return year ? itemYear === Number(year) : true;
+                });
             }
 
             async function fetchTopThreeEventWins(year) {
                 try {
-                    const totalPages = await getEventTotalPages().then(res => res);
-                    let recentWins = [];
+                    const tickets = await fetchAllMyTickets();
+                    const eventTickets = filterTicketsByYearAndType(tickets, 'EVENT', year);
+                    const grouped = new Map();
 
-                    for (let page = 1; page <= totalPages; page++) {
-                        const tableData = await scrapeEventListData(page).then(res => res);
-
-                        tableData.forEach(row => {
-                            const winStatus = row[0].includes('Detil');
-                            const eventDate = row[1];
-                            const eventYear = row[1].split(' ')[2];
-
-                            if (winStatus && eventYear === year.toString()) {
-                                const eventName = row[2];
-                                recentWins.push({ name: eventName, date: eventDate });
-                            }
-                        });
-
-                        // Break early if we already have the last three wins
-                        if (recentWins.length >= 3) {
-                            break;
+                    eventTickets.forEach(item => {
+                        const key = normalizeTransactionNumber(item);
+                        if (!grouped.has(key)) {
+                            grouped.set(key, {
+                                name: item?.ticket_label || item?.name || 'Unknown Event',
+                                date: getTicketDate(item)
+                            });
                         }
-                    }
+                    });
 
-                    // Sort by date and get the last three wins
-                    recentWins.sort((a, b) => new Date(b.date) - new Date(a.date));
-                    const lastThreeWins = recentWins.slice(0, 3);
-
-                    return lastThreeWins;
+                    return Array.from(grouped.values())
+                        .sort((a, b) => new Date(b.date) - new Date(a.date))
+                        .slice(0, 3);
                 } catch (error) {
                     console.error("Error in fetchTopThreeEventWins:", error);
-                    return false;
+                    return [];
                 }
+            }
+
+            function isTwoShotTicket(item) {
+                const text = [
+                    item?.reference_code,
+                    item?.ticket_label,
+                    item?.name,
+                    item?.session_label,
+                    item?.lane_label
+                ].filter(Boolean).join(' ').toLowerCase();
+
+                return /two\s*shot|twoshot|2\s*shot|2shot/.test(text) || /^oext/i.test(item?.reference_code || '');
+            }
+
+            function isVideoCallTicket(item) {
+                if (isTwoShotTicket(item)) return false;
+
+                const text = [
+                    item?.reference_code,
+                    item?.ticket_label,
+                    item?.name,
+                    item?.session_label,
+                    item?.lane_label
+                ].filter(Boolean).join(' ').toLowerCase();
+
+                return /video\s*call|videocall|vc|meet/.test(text) || /^oexh/i.test(item?.reference_code || '');
             }
 
             async function fetchTopVideoCallMembersByYear(year) {
                 try {
-                    const sessionResponse = await fetch('https://jkt48.com/mypage/handshake-session?lang=id');
-                    if (!sessionResponse.ok) {
-                        throw new Error(`HTTP error! Status: ${sessionResponse.status}`);
-                    }
-            
-                    const sessionText = await sessionResponse.text();
-                    const parser = new DOMParser();
-                    const sessionDoc = parser.parseFromString(sessionText, 'text/html');
-            
-                    // Fungsi untuk memuat semua halaman handshake
-                    async function fetchAllHandshakePages() {
-                        let allHandshakeData = [];
-                        let page = 1;
-                        let hasNextPage = true;
-            
-                        while (hasNextPage) {
-                            const listResponse = await fetch(`https://jkt48.com/mypage/handshake-list?page=${page}&lang=id`);
-                            if (!listResponse.ok) {
-                                throw new Error(`HTTP error! Status: ${listResponse.status}`);
-                            }
-            
-                            const listText = await listResponse.text();
-                            const listDoc = parser.parseFromString(listText, 'text/html');
-                            
-                            const handshakeList = Array.from(listDoc.querySelectorAll('tbody tr')).map(row => {
-                                const name = row.querySelector('td:nth-child(4)')?.textContent?.trim() || null;
-                                const orderDate = row.querySelector('td:nth-child(3)')?.textContent?.trim() || null;
-                                const yearMatch = orderDate?.match(/\d{4}/);
-                                return {
-                                    name,
-                                    year: yearMatch ? parseInt(yearMatch[0], 10) : null,
-                                };
-                            }).filter(item => item.name && item.year);
-            
-                            allHandshakeData = [...allHandshakeData, ...handshakeList];
-            
-                            // Mengecek apakah ada halaman berikutnya
-                            const nextPageLink = listDoc.querySelector('.entry-news__list--pagination .next a');
-                            hasNextPage = nextPageLink !== null;
-                            page++;
-                        }
-            
-                        return allHandshakeData;
-                    }
-            
-                    const handshakeList = await fetchAllHandshakePages();
-            
-                    // Fungsi untuk mendapatkan tahun berdasarkan judul handshake
-                    function getYearByTitle(title) {
-                        const cleanTitle = title.replace(/[^a-zA-Z0-9\s]/g, '');
-                        const match = handshakeList.find(item => {
-                            return item.name.replace(/[^a-zA-Z0-9\s]/g, '').trim() === cleanTitle.trim();
-                        });
-                        return match?.year || null;
-                    }
-            
+                    const tickets = await fetchAllMyTickets();
+                    const filtered = filterTicketsByYearAndType(tickets, 'EXCLUSIVE', year).filter(isVideoCallTicket);
                     let memberTicketData = {};
                     let totalTickets = 0;
-            
-                    Array.from(sessionDoc.querySelectorAll('h4')).forEach(element => {
-                        const sessionTitle = element.textContent.trim();
-                        let sessionYear = sessionTitle.match(/\d{4}/)?.[0];
-            
-                        if (!sessionYear) {
-                            sessionYear = getYearByTitle(sessionTitle);
-                        } else {
-                            sessionYear = parseInt(sessionYear, 10);
+
+                    filtered.forEach(item => {
+                        const memberName = item?.member_name;
+                        const ticketsBought = Number(item?.bought_count || 0);
+
+                        if (!memberName || ticketsBought <= 0) return;
+
+                        totalTickets += ticketsBought;
+                        if (!memberTicketData[memberName]) {
+                            memberTicketData[memberName] = 0;
                         }
-            
-                        if (sessionYear == year) {
-                            const historyTable = element.nextElementSibling?.querySelector('.entry-mypage__history table.table tbody');
-                            if (!historyTable) return;
-            
-                            Array.from(historyTable.querySelectorAll('tr')).forEach(row => {
-                                const memberName = row.querySelector('td:nth-child(5)')?.textContent?.trim() || null;
-                                const ticketsBought = parseInt(row.querySelector('td:nth-child(6)')?.textContent?.trim(), 10) || 0;
-            
-                                if (memberName) {
-                                    totalTickets += ticketsBought;
-            
-                                    if (!memberTicketData[memberName]) {
-                                        memberTicketData[memberName] = 0;
-                                    }
-                                    memberTicketData[memberName] += ticketsBought;
-                                }
-                            });
-                        }
+                        memberTicketData[memberName] += ticketsBought;
                     });
-            
+
                     const sortedMembers = Object.entries(memberTicketData)
                         .sort((a, b) => b[1] - a[1])
                         .slice(0, 3)
                         .map(member => ({ name: member[0], tickets: member[1] }));
-            
+
                     return { topMembers: sortedMembers, totalTickets };
                 } catch (error) {
                     console.error('Error in fetchTopVideoCallMembersByYear:', error);
@@ -546,103 +976,31 @@ chrome.runtime.onMessage.addListener(
                 }
             }
 
-            //2s
             async function fetchTopTwoShotMembersByYear(year) {
                 try {
-                    const sessionResponse = await fetch('https://jkt48.com/mypage/twoshot-session?lang=id');
-                    if (!sessionResponse.ok) {
-                        throw new Error(`HTTP error! Status: ${sessionResponse.status}`);
-                    }
-            
-                    const sessionText = await sessionResponse.text();
-                    const parser = new DOMParser();
-                    const sessionDoc = parser.parseFromString(sessionText, 'text/html');
-            
-                    // Fungsi untuk memuat semua halaman handshake
-                    async function fetchAllTwoShotPages() {
-                        let allTwoShotData = [];
-                        let page = 1;
-                        let hasNextPage = true;
-            
-                        while (hasNextPage) {
-                            const listResponse = await fetch(`https://jkt48.com/mypage/twoshot-list?page=${page}&lang=id`);
-                            if (!listResponse.ok) {
-                                throw new Error(`HTTP error! Status: ${listResponse.status}`);
-                            }
-            
-                            const listText = await listResponse.text();
-                            const listDoc = parser.parseFromString(listText, 'text/html');
-                            
-                            const twoShotList = Array.from(listDoc.querySelectorAll('tbody tr')).map(row => {
-                                const name = row.querySelector('td:nth-child(4)')?.textContent?.trim() || null;
-                                const orderDate = row.querySelector('td:nth-child(3)')?.textContent?.trim() || null;
-                                const yearMatch = orderDate?.match(/\d{4}/);
-                                return {
-                                    name,
-                                    year: yearMatch ? parseInt(yearMatch[0], 10) : null,
-                                };
-                            }).filter(item => item.name && item.year);
-            
-                            allTwoShotData = [...allTwoShotData, ...twoShotList];
-            
-                            // Mengecek apakah ada halaman berikutnya
-                            const nextPageLink = listDoc.querySelector('.entry-news__list--pagination .next a');
-                            hasNextPage = nextPageLink !== null;
-                            page++;
-                        }
-            
-                        return allTwoShotData;
-                    }
-            
-                    const twoShotList = await fetchAllTwoShotPages();
-            
-                    // Fungsi untuk mendapatkan tahun berdasarkan judul handshake
-                    function getYearByTitle(title) {
-                        const cleanTitle = title.replace(/[^a-zA-Z0-9\s]/g, '');
-                        const match = twoShotList.find(item => {
-                            return item.name.replace(/[^a-zA-Z0-9\s]/g, '').trim() === cleanTitle.trim();
-                        });
-                        return match?.year || null;
-                    }
-            
+                    const tickets = await fetchAllMyTickets();
+                    const filtered = filterTicketsByYearAndType(tickets, 'EXCLUSIVE', year).filter(isTwoShotTicket);
                     let memberTicketData = {};
                     let totalTickets = 0;
-            
-                    Array.from(sessionDoc.querySelectorAll('h4')).forEach(element => {
-                        const sessionTitle = element.textContent.trim();
-                        let sessionYear = sessionTitle.match(/\d{4}/)?.[0];
-            
-                        if (!sessionYear) {
-                            sessionYear = getYearByTitle(sessionTitle);
-                        } else {
-                            sessionYear = parseInt(sessionYear, 10);
+
+                    filtered.forEach(item => {
+                        const memberName = item?.member_name;
+                        const ticketsBought = Number(item?.bought_count || 0);
+
+                        if (!memberName || ticketsBought <= 0) return;
+
+                        totalTickets += ticketsBought;
+                        if (!memberTicketData[memberName]) {
+                            memberTicketData[memberName] = 0;
                         }
-            
-                        if (sessionYear == year) {
-                            const historyTable = element.nextElementSibling?.querySelector('.entry-mypage__history table.table tbody');
-                            if (!historyTable) return;
-            
-                            Array.from(historyTable.querySelectorAll('tr')).forEach(row => {
-                                const memberName = row.querySelector('td:nth-child(5)')?.textContent?.trim() || null;
-                                const ticketsBought = parseInt(row.querySelector('td:nth-child(6)')?.textContent?.trim(), 10) || 0;
-            
-                                if (memberName) {
-                                    totalTickets += ticketsBought;
-            
-                                    if (!memberTicketData[memberName]) {
-                                        memberTicketData[memberName] = 0;
-                                    }
-                                    memberTicketData[memberName] += ticketsBought;
-                                }
-                            });
-                        }
+                        memberTicketData[memberName] += ticketsBought;
                     });
-            
+
                     const sortedMembers = Object.entries(memberTicketData)
                         .sort((a, b) => b[1] - a[1])
                         .slice(0, 3)
                         .map(member => ({ name: member[0], tickets: member[1] }));
-            
+
                     return { topMembers: sortedMembers, totalTickets };
                 } catch (error) {
                     console.error('Error in fetchTopTwoShotMembersByYear:', error);
@@ -695,6 +1053,11 @@ chrome.runtime.onMessage.addListener(
 
             const getData = async (req, res) => {
                 try {
+                    const sessionActive = await hasActiveSession();
+                    if (!sessionActive) {
+                        return res.status(401).json({ success: false, sessionActive: false, message: "Sesi login tidak aktif" });
+                    }
+
                     const { year } = req.body;
                     let data = {
                         theater: {},
@@ -729,7 +1092,11 @@ chrome.runtime.onMessage.addListener(
             
                             data.name = profile;
                             data.oshi = myPej.oshi;
+                            data.userPic = myPej.userPic;
                             data.oshiPic = myPej.oshiPic;
+                            data.memberSince = myPej.memberSince;
+                            data.memberDuration = myPej.memberDuration;
+                            data.isOfc = myPej.isOfc;
 
                             // Gabungkan data setlists
                             allSetlists = allSetlists.concat(topByWins);
@@ -805,8 +1172,9 @@ chrome.runtime.onMessage.addListener(
                             data.theater.topSetlists = "Belum pernah Theateran 😭";
                         }
             
+                        const allTimeTotalGames = allWinLossData.wins + allWinLossData.losses;
                         data.theater.winrate = {
-                            rate: ((allWinLossData.wins / (allWinLossData.wins + allWinLossData.losses)) * 100).toFixed(2) + '%',
+                            rate: (allTimeTotalGames > 0 ? ((allWinLossData.wins / allTimeTotalGames) * 100).toFixed(2) : '0.00') + '%',
                             detail: {
                                 menang: allWinLossData.wins,
                                 kalah: allWinLossData.losses
@@ -821,7 +1189,7 @@ chrome.runtime.onMessage.addListener(
                             data.events = "Belum pernah ikut Event 😭";
                         }
             
-                        if (allVideoCalls.topMembers.length !== 0) {
+                        if (Object.keys(allVideoCalls.topMembers).length !== 0) {
                             data.videoCall.topMembers = Object.entries(allVideoCalls.topMembers)
                                 .sort((a, b) => b[1] - a[1])
                                 .slice(0, 3)
@@ -835,7 +1203,7 @@ chrome.runtime.onMessage.addListener(
                         }
 
                         //2s
-                        if (allTwoShots.topMembers.length !== 0) {
+                        if (Object.keys(allTwoShots.topMembers).length !== 0) {
                             data.twoShot.topMembers = Object.entries(allTwoShots.topMembers)
                                 .sort((a, b) => b[1] - a[1])
                                 .slice(0, 3)
@@ -873,7 +1241,11 @@ chrome.runtime.onMessage.addListener(
             
                         data.name = profile;
                         data.oshi = myPej.oshi;
+                        data.userPic = myPej.userPic;
                         data.oshiPic = myPej.oshiPic;
+                        data.memberSince = myPej.memberSince;
+                        data.memberDuration = myPej.memberDuration;
+                        data.isOfc = myPej.isOfc;
 
                         // Theater
                         if (topByWins.length !== 0) {
@@ -950,7 +1322,7 @@ chrome.runtime.onMessage.addListener(
                     res.json({ success: true, data });
                 } catch (error) {
                     console.error(error);
-                    res.status(500).json({ success: false, message: "Terjadi kesalahan pada server" });
+                    res.status(500).json({ success: false, sessionActive: true, message: "Terjadi kesalahan pada server" });
                 }
             };                   
 
@@ -967,3 +1339,120 @@ chrome.runtime.onMessage.addListener(
         }
     }
 );
+
+// === Sort Member by Team ===
+async function applyTeamSort() {
+    const jsonUrl = "https://gist.githubusercontent.com/dandyraka/ccff2c3810acf2094df6bcc1d65225d5/raw/590dcffd80c49214fbc06e2fd9e61010d999605a/jkt48_team.json";
+    
+    try {
+        const response = await fetch(jsonUrl);
+        const teams = await response.json();
+
+        const memberGrid = getMemberGridContainer();
+        if (!memberGrid) return;
+        memberGrid.setAttribute(WRAPPED_MEMBER_GRID_ATTR, 'true');
+
+        let sourceHTML = getOriginalMemberHTMLForCurrentView();
+        if ((!sourceHTML || sourceHTML.trim() === '') && !isSortedMemberGrid(memberGrid)) {
+            sourceHTML = memberGrid.innerHTML;
+            captureOriginalMemberHTML(memberGrid, true);
+        }
+
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = sourceHTML;
+        const allMemberNodes = Array.from(tempDiv.querySelectorAll('a.member-card'));
+
+        if (allMemberNodes.length === 0) {
+            console.warn('Sort by Team dibatalkan karena source member card tidak ditemukan.');
+            return;
+        }
+
+        memberGrid.innerHTML = '';
+
+        const sectionWrapper = document.createElement('div');
+        sectionWrapper.style.display = 'flex';
+        sectionWrapper.style.flexDirection = 'column';
+        sectionWrapper.style.gap = '2rem';
+        sectionWrapper.style.width = '100%';
+        sectionWrapper.style.gridColumn = '1 / -1';
+        sectionWrapper.setAttribute(WRAPPED_TEAM_SECTION_ATTR, 'true');
+
+        const findMemberElement = (name) => {
+            return allMemberNodes.find(node => {
+                const nodeText = node.innerText.toLowerCase().replace(/\s+/g, '');
+                const targetName = name.toLowerCase().replace(/\s+/g, '');
+                return nodeText.includes(targetName) || targetName.includes(nodeText);
+            });
+        };
+
+        const cloneMemberCard = (element) => {
+            const clone = element.cloneNode(true);
+            const animatedCard = clone.querySelector('.member-card-inner');
+            if (animatedCard) {
+                animatedCard.style.opacity = '1';
+                animatedCard.style.transform = 'translate(0px, 0px)';
+                animatedCard.style.translate = 'none';
+                animatedCard.style.rotate = 'none';
+                animatedCard.style.scale = 'none';
+            }
+            clone.classList.add('aos-animate');
+            return clone;
+        };
+
+        const createSection = (title) => {
+            const section = document.createElement('section');
+            section.style.width = '100%';
+
+            const header = document.createElement('h2');
+            header.className = 'title-home text-center inline-block mx-auto pb-6 lg:pb-4 aos-init aos-animate';
+            header.textContent = title;
+            header.setAttribute('data-aos', 'fade-up');
+            header.setAttribute('data-aos-delay', '200');
+            header.style.display = 'block';
+            header.style.margin = '0 auto 1rem auto';
+
+            const grid = document.createElement('div');
+            grid.className = memberGrid.className;
+
+            section.appendChild(header);
+            section.appendChild(grid);
+            return { section, grid };
+        };
+
+        Object.keys(teams).forEach(teamName => {
+            const { section, grid } = createSection(teamName);
+            
+            teams[teamName].forEach(memberName => {
+                const element = findMemberElement(memberName);
+                if (element) grid.appendChild(cloneMemberCard(element));
+            });
+
+            if (grid.children.length > 0) {
+                sectionWrapper.appendChild(section);
+            }
+        });
+
+        const assignedNames = Object.values(teams).flat().map(name => name.toLowerCase().replace(/\s+/g, ''));
+        const { section: traineeSection, grid: traineeGrid } = createSection('Trainee JKT48');
+
+        allMemberNodes.forEach(node => {
+            const nodeText = node.innerText.toLowerCase().replace(/\s+/g, '');
+            const isAlreadyAssigned = assignedNames.some(targetName => 
+                nodeText.includes(targetName) || targetName.includes(nodeText)
+            );
+            if (!isAlreadyAssigned) traineeGrid.appendChild(cloneMemberCard(node));
+        });
+
+        if (traineeGrid.children.length > 0) {
+            sectionWrapper.appendChild(traineeSection);
+        }
+
+        memberGrid.appendChild(sectionWrapper);
+        memberGrid.setAttribute(WRAPPED_TEAM_SECTION_ATTR, 'true');
+
+        window.scrollTo(0, 0);
+
+    } catch (error) {
+        console.error("Gagal sortir:", error);
+    }
+}

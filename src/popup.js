@@ -9,18 +9,68 @@
     const resultText = document.getElementById('result');
 
     resultText.style.display = 'none';
+    let sessionActive = false;
 
-    loginBtn?.addEventListener('click', async () => {
-        resultText.innerText = 'Loading...';
-        resultText.style.display = 'block';
+    function setResult(message, isError = false) {
+        resultText.innerText = message;
+        resultText.style.display = message ? 'block' : 'none';
+        resultText.style.color = isError ? '#ffb4b4' : '#ffffff';
+    }
 
+    function setSessionState(isActive, message = '') {
+        sessionActive = isActive;
+
+        if (!isActive) {
+            loginBtn.style.display = 'block';
+            loginBtn.disabled = false;
+            yearSelectorDiv.style.display = 'none';
+            yearSelect.innerHTML = '';
+            setResult(message || 'Login dulu di web JKT48 untuk memakai Wrapped.', true);
+            return;
+        }
+
+        setResult(message, false);
+    }
+
+    function getActiveTab(callback) {
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            const activeTab = tabs[0];
-            const message = { action: "login" };
+            callback(tabs?.[0] || null);
+        });
+    }
+
+    function sendMessageToActiveTab(message, callback) {
+        getActiveTab((activeTab) => {
+            if (!activeTab?.id) {
+                callback?.({ ok: false, error: 'Tab aktif tidak ditemukan.' });
+                return;
+            }
+
             chrome.tabs.sendMessage(activeTab.id, message, function (response) {
-                console.log('Received response:', response);
-                if (response && response.data.success) {
-                    response.data.data.forEach(year => {
+                if (chrome.runtime.lastError) {
+                    callback?.({ ok: false, error: chrome.runtime.lastError.message });
+                    return;
+                }
+
+                callback?.({ ok: true, response });
+            });
+        });
+    }
+
+    function loadYears() {
+        setResult('Loading...', false);
+
+        sendMessageToActiveTab({ action: 'check_session' }, (sessionResult) => {
+            const isActive = Boolean(sessionResult?.ok && sessionResult?.response?.active);
+            if (!isActive) {
+                setSessionState(false);
+                return;
+            }
+
+            sendMessageToActiveTab({ action: 'login' }, function (response) {
+                if (response?.ok && response.response?.data?.success) {
+                    yearSelect.innerHTML = '';
+
+                    response.response.data.data.forEach(year => {
                         const option = document.createElement('option');
                         option.value = year.year;
                         option.text = year.year;
@@ -28,43 +78,55 @@
                     });
 
                     const allTimeOption = document.createElement('option');
-                    allTimeOption.value = "all";
-                    allTimeOption.text = "All Time";
+                    allTimeOption.value = 'all';
+                    allTimeOption.text = 'All Time';
                     yearSelect.add(allTimeOption);
 
+                    sessionActive = true;
                     yearSelectorDiv.style.display = 'block';
                     loginBtn.style.display = 'none';
-                    resultText.style.display = 'none';
+                    setResult('', false);
                 } else {
-                    resultText.innerText = 'Gagal mengambil data, buka dan login pada web JKT48 dulu.';
-                    resultText.style.display = 'block';
+                    setSessionState(false, 'Login dulu di web JKT48 untuk memakai Wrapped.');
                 }
             });
         });
+    }
+
+    loginBtn?.addEventListener('click', async () => {
+        loadYears();
     });
 
     submitBtn?.addEventListener('click', async () => {
-        const selectedYear = yearSelect.value;
-        resultText.innerText = 'Loading...';
-        resultText.style.display = 'block';
+        if (!sessionActive) {
+            setSessionState(false);
+            return;
+        }
 
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            const activeTab = tabs[0];
-            const message = { action: "scrap", year: selectedYear };
-            chrome.tabs.sendMessage(activeTab.id, message, function (response) {
-                console.log('Received response:', response);
-                if (response && response.data.success) {
-                    resultText.style.display = 'none';
-                    const tahun = (selectedYear == "all") ? "All Time" : selectedYear;
-                    const resulto = { data: response.data.data, year: tahun }
+        const selectedYear = yearSelect.value;
+        setResult('Loading...', false);
+
+        sendMessageToActiveTab({ action: 'check_session' }, (sessionResult) => {
+            const isActive = Boolean(sessionResult?.ok && sessionResult?.response?.active);
+            if (!isActive) {
+                setSessionState(false);
+                return;
+            }
+
+            sendMessageToActiveTab({ action: 'scrap', year: selectedYear }, function (response) {
+                if (response?.ok && response.response?.data?.success) {
+                    setResult('', false);
+                    const tahun = (selectedYear === 'all') ? 'All Time' : selectedYear;
+                    const resulto = { data: response.response.data.data, year: tahun };
 
                     const encryptedData = CryptoJS.AES.encrypt(JSON.stringify(resulto), secretKey).toString();
                     chrome.tabs.create({ url: `https://jkt48live.github.io/wrappedExtWeb/${encodeURIComponent(encryptedData)}` });
                 } else {
-                    resultText.innerText = 'Gagal mengambil data.';
-                    resultText.style.display = 'block';
+                    setResult('Gagal mengambil data.', true);
                 }
             });
         });
     });
+
+    loadYears();
 })();
