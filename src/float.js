@@ -55,6 +55,11 @@ panel.innerHTML = `
 `;
 document.body.appendChild(panel);
 
+let cachedYears = [];
+let cachedSessionActive = null;
+let lastYearsFetchAt = 0;
+const YEARS_THROTTLE_MS = 15000;
+
 function isMemberPage() {
   return window.location.pathname === "/member";
 }
@@ -68,8 +73,10 @@ function updateSortMemberVisibility() {
   const sortSection = document.getElementById("sortMemberSection");
   const sortToggle = document.getElementById("teamSortToggle");
   if (!sortSection) return;
+
   const shouldShow = isSortableMemberPage();
   sortSection.style.display = shouldShow ? "block" : "none";
+
   if (sortToggle && !shouldShow) {
     const wasChecked = sortToggle.checked;
     sortToggle.checked = false;
@@ -100,10 +107,10 @@ history.replaceState = function (...args) {
 };
 
 document.getElementById("teamSortToggle").addEventListener("change", (e) => {
-    const event = new CustomEvent("DO_TEAM_SORT", { 
-        detail: { status: e.target.checked } 
-    });
-    window.dispatchEvent(event);
+  const event = new CustomEvent("DO_TEAM_SORT", {
+    detail: { status: e.target.checked }
+  });
+  window.dispatchEvent(event);
 });
 
 function setWrappedSessionState(sessionActive, message = "") {
@@ -130,43 +137,85 @@ function setWrappedSessionState(sessionActive, message = "") {
   loading.style.display = message ? "block" : "none";
 }
 
+function renderWrappedYears(years, sessionActive = true) {
+  const select = document.getElementById("wrappedYear");
+  if (!select) return;
+
+  select.innerHTML = "";
+
+  if (sessionActive === false) {
+    setWrappedSessionState(false);
+    return;
+  }
+
+  setWrappedSessionState(true);
+
+  years.forEach(y => {
+    const opt = document.createElement("option");
+    opt.value = y.year;
+    opt.textContent = y.year;
+    select.appendChild(opt);
+  });
+
+  const all = document.createElement("option");
+  all.value = "all";
+  all.textContent = "All Time";
+  select.appendChild(all);
+}
+
 // === Toggle panel ===
 btn.addEventListener("click", () => {
-  panel.style.display = panel.style.display === "none" ? "block" : "none";
+  const isOpening = panel.style.display === "none";
+  panel.style.display = isOpening ? "block" : "none";
 
-  // setiap buka → reload tahun
+  if (!isOpening) {
+    return;
+  }
+
+  const isCacheFresh = cachedSessionActive === true
+    && cachedYears.length > 0
+    && (Date.now() - lastYearsFetchAt < YEARS_THROTTLE_MS);
+
+  if (isCacheFresh) {
+    renderWrappedYears(cachedYears, true);
+    return;
+  }
+
+  const loading = document.getElementById("wrappedLoading");
+  loading.style.display = "block";
+  loading.style.color = "#555";
+  loading.textContent = "Mengambil daftar tahun...";
   chrome.runtime.sendMessage({ action: "REQ_YEARS" });
 });
 
-// === Terima list tahun ===
+// === Terima list tahun / progress ===
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === "SEND_YEARS") {
-    const select = document.getElementById("wrappedYear");
-    select.innerHTML = "";
-
     if (msg.sessionActive === false) {
+      cachedSessionActive = false;
+      cachedYears = [];
       setWrappedSessionState(false);
       return;
     }
 
-    setWrappedSessionState(true);
-
-    msg.years.forEach(y => {
-      const opt = document.createElement("option");
-      opt.value = y.year;
-      opt.textContent = y.year;
-      select.appendChild(opt);
-    });
-
-    // All Time
-    const all = document.createElement("option");
-    all.value = "all";
-    all.textContent = "All Time";
-    select.appendChild(all);
+    cachedSessionActive = true;
+    cachedYears = Array.isArray(msg.years) ? msg.years : [];
+    lastYearsFetchAt = Date.now();
+    renderWrappedYears(cachedYears, true);
   }
 
   if (msg.action === "SESSION_REQUIRED") {
+    cachedSessionActive = false;
+    cachedYears = [];
     setWrappedSessionState(false, msg.message);
+  }
+
+  if (msg.action === "WRAPPED_PROGRESS") {
+    const loading = document.getElementById("wrappedLoading");
+    if (!loading) return;
+    loading.style.display = "block";
+    loading.style.color = "#555";
+    loading.textContent = msg.message;
   }
 });
 
@@ -181,14 +230,12 @@ document.getElementById("wrappedPanel").addEventListener("click", e => {
       return;
     }
 
-    // tampilkan loading
     loading.style.display = "block";
     loading.style.color = "#555";
-    loading.textContent = "Loading...";
+    loading.textContent = `Menyiapkan Wrapped ${year === "all" ? "All Time" : year}...`;
 
-    // kirim request
     chrome.runtime.sendMessage({ action: "SCRAP_YEAR", year }, () => {
-      // loading tetap terlihat sampai background buka tab baru
+      // Progress berikutnya akan dikirim lewat WRAPPED_PROGRESS.
     });
   }
 });

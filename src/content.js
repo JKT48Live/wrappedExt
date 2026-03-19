@@ -5,6 +5,164 @@ let lastMemberViewUrl = window.location.href;
 let memberRouteRefreshTimer = null;
 const WRAPPED_MEMBER_GRID_ATTR = 'data-wrapped-member-grid';
 const WRAPPED_TEAM_SECTION_ATTR = 'data-wrapped-team-sections';
+const WRAPPED_PAGE_AUTH_BRIDGE_ID = 'jkt48-wrapped-auth-bridge';
+const WRAPPED_PAGE_AUTH_REQUEST = 'JKT48_WRAPPED_AUTH_REQUEST';
+const WRAPPED_PAGE_AUTH_RESPONSE = 'JKT48_WRAPPED_AUTH_RESPONSE';
+const pageContextAuthState = {
+    accessToken: null,
+    refreshToken: null,
+    lastUpdatedAt: 0
+};
+
+function updatePageContextAuthState(payload = {}) {
+    if (payload.accessToken) {
+        pageContextAuthState.accessToken = payload.accessToken;
+    }
+
+    if (payload.refreshToken) {
+        pageContextAuthState.refreshToken = payload.refreshToken;
+    }
+
+    if (payload.accessToken || payload.refreshToken) {
+        pageContextAuthState.lastUpdatedAt = Date.now();
+    }
+}
+
+window.addEventListener('message', (event) => {
+    if (event.source !== window) {
+        return;
+    }
+
+    if (event.data?.type !== WRAPPED_PAGE_AUTH_RESPONSE) {
+        return;
+    }
+
+    updatePageContextAuthState(event.data);
+});
+
+function injectPageAuthBridge() {
+    if (document.getElementById(WRAPPED_PAGE_AUTH_BRIDGE_ID)) {
+        return;
+    }
+
+    const script = document.createElement('script');
+    script.id = WRAPPED_PAGE_AUTH_BRIDGE_ID;
+    script.textContent = `
+        (() => {
+            const REQUEST = '${WRAPPED_PAGE_AUTH_REQUEST}';
+            const RESPONSE = '${WRAPPED_PAGE_AUTH_RESPONSE}';
+            const authState = {
+                accessToken: null,
+                refreshToken: null
+            };
+
+            const emitAuthState = () => {
+                window.postMessage({
+                    type: RESPONSE,
+                    accessToken: authState.accessToken,
+                    refreshToken: authState.refreshToken
+                }, '*');
+            };
+
+            const captureFromValue = (value) => {
+                if (!value) return;
+                if (typeof value === 'string' && value.startsWith('Bearer ')) {
+                    authState.accessToken = value.slice(7);
+                    emitAuthState();
+                }
+            };
+
+            const originalFetch = window.fetch;
+            if (typeof originalFetch === 'function') {
+                window.fetch = async function(...args) {
+                    const requestInit = args[1];
+                    if (requestInit?.headers) {
+                        if (requestInit.headers instanceof Headers) {
+                            captureFromValue(requestInit.headers.get('authorization'));
+                        } else if (Array.isArray(requestInit.headers)) {
+                            const authHeader = requestInit.headers.find(([key]) => String(key).toLowerCase() === 'authorization');
+                            captureFromValue(authHeader?.[1]);
+                        } else if (typeof requestInit.headers === 'object') {
+                            captureFromValue(requestInit.headers.authorization || requestInit.headers.Authorization);
+                        }
+                    }
+
+                    return originalFetch.apply(this, args);
+                };
+            }
+
+            const originalOpen = XMLHttpRequest.prototype.open;
+            const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+            XMLHttpRequest.prototype.open = function(...args) {
+                this.__wrappedRequestUrl = args[1];
+                return originalOpen.apply(this, args);
+            };
+            XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+                if (String(name).toLowerCase() === 'authorization') {
+                    captureFromValue(value);
+                }
+                return originalSetRequestHeader.apply(this, arguments);
+            };
+
+            window.addEventListener('message', async (event) => {
+                if (event.source !== window || event.data?.type !== REQUEST) {
+                    return;
+                }
+
+                if (event.data?.forceRefresh || !authState.accessToken) {
+                    try {
+                        const response = await originalFetch('/api/auth/session', {
+                            credentials: 'include',
+                            headers: {
+                                accept: 'application/json, text/plain, */*'
+                            }
+                        });
+
+                        if (response.ok) {
+                            const json = await response.json();
+                            if (json?.access_token) authState.accessToken = json.access_token;
+                            if (json?.refresh_token) authState.refreshToken = json.refresh_token;
+                        }
+                    } catch (_) {
+                        // Ignore session fetch failure in page bridge.
+                    }
+                }
+
+                emitAuthState();
+            });
+        })();
+    `;
+
+    (document.documentElement || document.head || document.body).appendChild(script);
+}
+
+async function requestPageContextAuthState(forceRefresh = false, timeoutMs = 1500) {
+    injectPageAuthBridge();
+
+    return await new Promise((resolve) => {
+        const start = Date.now();
+        const finish = () => resolve({ ...pageContextAuthState });
+
+        const messageHandler = (event) => {
+            if (event.source !== window || event.data?.type !== WRAPPED_PAGE_AUTH_RESPONSE) {
+                return;
+            }
+
+            window.removeEventListener('message', messageHandler);
+            finish();
+        };
+
+        window.addEventListener('message', messageHandler);
+        window.postMessage({ type: WRAPPED_PAGE_AUTH_REQUEST, forceRefresh }, '*');
+
+        setTimeout(() => {
+            window.removeEventListener('message', messageHandler);
+            if (Date.now() - start >= timeoutMs) {
+                finish();
+            }
+        }, timeoutMs);
+    });
+}
 
 function isMemberPage() {
     return window.location.pathname === "/member";
@@ -198,8 +356,13 @@ chrome.runtime.onMessage.addListener(
     function (request, sender, sendResponse) {
         const API_BASE_URL = 'https://jkt48.com/api/v1/accounts';
         let cachedAuthToken = null;
+        let cachedRefreshToken = null;
+        let cachedSessionPayload = null;
+        let cachedSessionFetchedAt = 0;
         let cachedMembersPromise = null;
         const DEFAULT_MEMBER_IMAGE = 'https://jkt48.com/images/no-image-2.png';
+        const SESSION_CACHE_TTL_MS = 60 * 1000;
+        const PAGINATION_DELAY_MS = 250;
 
         function extractJwtCandidatesFromValue(value, bucket = []) {
             if (!value) return bucket;
@@ -232,12 +395,25 @@ chrome.runtime.onMessage.addListener(
             return bucket;
         }
 
-        async function getAuthToken() {
-            if (cachedAuthToken) {
-                return cachedAuthToken;
-            }
+        function reportProgress(message) {
+            chrome.runtime.sendMessage({
+                action: 'PROGRESS_UPDATE',
+                message
+            });
+        }
 
-            const candidateValues = [];
+        function delay(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        async function getSessionPayload(forceRefresh = false) {
+            const isCacheFresh = !forceRefresh
+                && cachedSessionPayload
+                && (Date.now() - cachedSessionFetchedAt < SESSION_CACHE_TTL_MS);
+
+            if (isCacheFresh) {
+                return cachedSessionPayload;
+            }
 
             try {
                 const sessionResponse = await fetch('https://jkt48.com/api/auth/session', {
@@ -247,14 +423,38 @@ chrome.runtime.onMessage.addListener(
                     }
                 });
 
-                if (sessionResponse.ok) {
-                    const sessionJson = await sessionResponse.json();
-                    candidateValues.push(sessionJson);
+                if (!sessionResponse.ok) {
+                    return null;
                 }
-            } catch (error) {
-                // Some page contexts cannot access the NextAuth session endpoint reliably.
-                // This is only a best-effort token source, so fail silently and continue
-                // with other sources like localStorage/sessionStorage.
+
+                const sessionJson = await sessionResponse.json();
+                cachedSessionPayload = sessionJson;
+                cachedSessionFetchedAt = Date.now();
+                cachedAuthToken = sessionJson?.access_token || cachedAuthToken;
+                cachedRefreshToken = sessionJson?.refresh_token || cachedRefreshToken;
+                return sessionJson;
+            } catch (_) {
+                return null;
+            }
+        }
+
+        async function getAuthToken(forceRefresh = false) {
+            if (!forceRefresh && cachedAuthToken) {
+                return cachedAuthToken;
+            }
+
+            const candidateValues = [];
+
+            const pageContextTokens = await requestPageContextAuthState(forceRefresh);
+            if (pageContextTokens?.accessToken) {
+                cachedAuthToken = pageContextTokens.accessToken;
+                cachedRefreshToken = pageContextTokens.refreshToken || cachedRefreshToken;
+                return cachedAuthToken;
+            }
+
+            const sessionPayload = await getSessionPayload(forceRefresh);
+            if (sessionPayload) {
+                candidateValues.push(sessionPayload);
             }
 
             try {
@@ -284,27 +484,6 @@ chrome.runtime.onMessage.addListener(
             return cachedAuthToken;
         }
 
-        async function hasActiveSession() {
-            try {
-                const sessionResponse = await fetch('https://jkt48.com/api/auth/session', {
-                    credentials: 'include',
-                    headers: {
-                        'accept': 'application/json, text/plain, */*'
-                    }
-                });
-
-                if (!sessionResponse.ok) {
-                    return false;
-                }
-
-                const sessionJson = await sessionResponse.json();
-                const jwtCandidates = extractJwtCandidatesFromValue(sessionJson);
-                return Boolean(sessionJson?.user || sessionJson?.expires || jwtCandidates.length > 0);
-            } catch (_) {
-                return false;
-            }
-        }
-
         async function fetchApiJson(path, page = null) {
             const url = new URL(`${API_BASE_URL}/${path}`);
             url.searchParams.set('lang', 'id');
@@ -328,7 +507,9 @@ chrome.runtime.onMessage.addListener(
             });
 
             if (!response.ok) {
-                throw new Error(`HTTP error! Status: ${response.status} (${path})${authToken ? '' : ' - bearer token not found'}`);
+                const error = new Error(`HTTP error! Status: ${response.status} (${path})${authToken ? '' : ' - bearer token not found'}`);
+                error.status = response.status;
+                throw error;
             }
 
             return response.json();
@@ -341,12 +522,23 @@ chrome.runtime.onMessage.addListener(
                 try {
                     if (attempt > 0) {
                         cachedAuthToken = null;
+                        cachedSessionPayload = null;
+                        cachedSessionFetchedAt = 0;
                         await new Promise(resolve => setTimeout(resolve, 500 * attempt));
                     }
 
                     return await fetchApiJson(path, page);
                 } catch (error) {
                     lastError = error;
+                    if ((error?.status === 401 || error?.status === 403) && attempt < retries) {
+                        reportProgress('Menyegarkan sesi login...');
+                        const refreshedSession = await getSessionPayload(true);
+                        if (refreshedSession?.access_token) {
+                            cachedAuthToken = refreshedSession.access_token;
+                            cachedRefreshToken = refreshedSession.refresh_token || cachedRefreshToken;
+                            continue;
+                        }
+                    }
                     const isNetworkError = error instanceof TypeError || /Failed to fetch/i.test(error?.message || '');
                     if (!isNetworkError || attempt === retries) {
                         throw error;
@@ -368,12 +560,15 @@ chrome.runtime.onMessage.addListener(
 
         async function fetchAllPurchaseHistory() {
             try {
+                reportProgress('Mengambil histori transaksi...');
                 const firstPage = await fetchPurchaseHistoryPage(1);
                 const totalPages = parseInt(firstPage.meta?.total_page, 10) || 1;
                 let allData = firstPage.items;
 
                 for (let page = 2; page <= totalPages; page++) {
                     try {
+                        await delay(PAGINATION_DELAY_MS);
+                        reportProgress(`Mengambil histori transaksi halaman ${page}/${totalPages}...`);
                         const nextPage = await fetchPurchaseHistoryPage(page);
                         allData = allData.concat(nextPage.items);
                     } catch (error) {
@@ -391,6 +586,7 @@ chrome.runtime.onMessage.addListener(
 
         async function fetchUserProfile() {
             try {
+                reportProgress('Mengambil profil user...');
                 const json = await fetchApiJsonWithRetry('user');
                 return json?.data || null;
             } catch (error) {
@@ -554,16 +750,15 @@ chrome.runtime.onMessage.addListener(
         if (request?.action === 'login') {
             async function login() {
                 try {
-                    const sessionActive = await hasActiveSession();
-                    if (!sessionActive) {
-                        return { success: false, sessionActive: false, message: "Sesi login tidak aktif" };
-                    }
-
+                    reportProgress('Menganalisis tahun transaksi yang tersedia...');
                     const years = await getAllYears();
                     const yrs = years.map(year => ({ year }));
 
                     return { success: true, sessionActive: true, data: yrs };
                 } catch (error) {
+                    if (error?.status === 401 || error?.status === 403) {
+                        return { success: false, sessionActive: false, message: "Sesi login tidak aktif" };
+                    }
                     console.error(error);
                     return { success: false, sessionActive: true, message: "Terjadi kesalahan pada server" };
                 }
@@ -574,14 +769,6 @@ chrome.runtime.onMessage.addListener(
             }).catch(error => {
                 console.error('Error:', error);
                 sendResponse({ success: false, message: "Terjadi kesalahan pada server" });
-            });
-            return true;
-        }
-        if (request?.action === 'check_session') {
-            hasActiveSession().then(isActive => {
-                sendResponse({ success: true, active: isActive });
-            }).catch(() => {
-                sendResponse({ success: true, active: false });
             });
             return true;
         }
@@ -710,7 +897,9 @@ chrome.runtime.onMessage.addListener(
                 });
 
                 if (!response.ok) {
-                    throw new Error(`HTTP error! Status: ${response.status} (my-tickets)${authToken ? '' : ' - bearer token not found'}`);
+                    const error = new Error(`HTTP error! Status: ${response.status} (my-tickets)${authToken ? '' : ' - bearer token not found'}`);
+                    error.status = response.status;
+                    throw error;
                 }
 
                 const json = await response.json();
@@ -727,12 +916,23 @@ chrome.runtime.onMessage.addListener(
                     try {
                         if (attempt > 0) {
                             cachedAuthToken = null;
+                            cachedSessionPayload = null;
+                            cachedSessionFetchedAt = 0;
                             await new Promise(resolve => setTimeout(resolve, 500 * attempt));
                         }
 
                         return await fetchMyTicketsPage(page);
                     } catch (error) {
                         lastError = error;
+                        if ((error?.status === 401 || error?.status === 403) && attempt < retries) {
+                            reportProgress('Menyegarkan token akses...');
+                            const refreshedSession = await getSessionPayload(true);
+                            if (refreshedSession?.access_token) {
+                                cachedAuthToken = refreshedSession.access_token;
+                                cachedRefreshToken = refreshedSession.refresh_token || cachedRefreshToken;
+                                continue;
+                            }
+                        }
                         const isNetworkError = error instanceof TypeError || /Failed to fetch/i.test(error?.message || '');
                         if (!isNetworkError || attempt === retries) {
                             throw error;
@@ -751,12 +951,15 @@ chrome.runtime.onMessage.addListener(
 
                 cachedMyTicketsPromise = (async () => {
                 try {
+                    reportProgress('Mengambil histori tiket...');
                     const firstPage = await fetchMyTicketsPageWithRetry(1);
                     const totalPages = parseInt(firstPage.meta?.total_page, 10) || 1;
                     let allTickets = firstPage.items;
 
                     for (let page = 2; page <= totalPages; page++) {
                         try {
+                            await delay(PAGINATION_DELAY_MS);
+                            reportProgress(`Mengambil histori tiket halaman ${page}/${totalPages}...`);
                             const nextPage = await fetchMyTicketsPageWithRetry(page);
                             allTickets = allTickets.concat(nextPage.items);
                         } catch (error) {
@@ -1053,12 +1256,8 @@ chrome.runtime.onMessage.addListener(
 
             const getData = async (req, res) => {
                 try {
-                    const sessionActive = await hasActiveSession();
-                    if (!sessionActive) {
-                        return res.status(401).json({ success: false, sessionActive: false, message: "Sesi login tidak aktif" });
-                    }
-
                     const { year } = req.body;
+                    reportProgress(`Menyusun data Wrapped ${year === 'all' ? 'All Time' : year}...`);
                     let data = {
                         theater: {},
                         events: {},
@@ -1321,6 +1520,9 @@ chrome.runtime.onMessage.addListener(
 
                     res.json({ success: true, data });
                 } catch (error) {
+                    if (error?.status === 401 || error?.status === 403) {
+                        return res.status(401).json({ success: false, sessionActive: false, message: "Sesi login tidak aktif" });
+                    }
                     console.error(error);
                     res.status(500).json({ success: false, sessionActive: true, message: "Terjadi kesalahan pada server" });
                 }

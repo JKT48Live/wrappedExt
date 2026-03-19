@@ -28,6 +28,18 @@ function sendMessageToTab(tabId, message, callback) {
   });
 }
 
+function sendRuntimeMessageSafe(message) {
+  try {
+    chrome.runtime.sendMessage(message, () => {
+      if (chrome.runtime.lastError) {
+        // Ignore when no extension page is listening.
+      }
+    });
+  } catch (_) {
+    // Ignore runtime delivery issues for optional UI listeners.
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender) => {
 
   function notifySessionRequired(tabId) {
@@ -37,29 +49,37 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     });
   }
 
+  function notifyProgress(tabId, message) {
+    sendMessageToTab(tabId, {
+      action: "WRAPPED_PROGRESS",
+      message
+    });
+
+    sendRuntimeMessageSafe({
+      action: "WRAPPED_PROGRESS",
+      message
+    });
+  }
+
+  if (msg.action === "PROGRESS_UPDATE") {
+    if (sender?.tab?.id) {
+      notifyProgress(sender.tab.id, msg.message);
+    }
+    return;
+  }
+
   // ====== AMBIL LIST TAHUN =====
   if (msg.action === "REQ_YEARS") {
     getTargetTabId(sender, tabId => {
-      sendMessageToTab(tabId, { action: "check_session" }, sessionResult => {
-        const sessionActive = Boolean(sessionResult?.ok && sessionResult?.response?.active);
+      notifyProgress(tabId, "Mengambil daftar tahun...");
+      sendMessageToTab(tabId, { action: "login" }, result => {
+        const years = result?.ok ? (result.response?.data?.data || []) : [];
+        const sessionActive = Boolean(result?.ok && result.response?.data?.sessionActive !== false);
 
-        if (!sessionActive) {
-          sendMessageToTab(tabId, {
-            action: "SEND_YEARS",
-            years: [],
-            sessionActive: false
-          });
-          return;
-        }
-
-        sendMessageToTab(tabId, { action: "login" }, result => {
-          const years = result?.ok ? (result.response?.data?.data || []) : [];
-
-          sendMessageToTab(tabId, {
-            action: "SEND_YEARS",
-            years,
-            sessionActive: true
-          });
+        sendMessageToTab(tabId, {
+          action: "SEND_YEARS",
+          years,
+          sessionActive
         });
       });
     });
@@ -70,33 +90,32 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     const year = msg.year;
 
     getTargetTabId(sender, tabId => {
-      sendMessageToTab(tabId, { action: "check_session" }, sessionResult => {
-        const sessionActive = Boolean(sessionResult?.ok && sessionResult?.response?.active);
-        if (!sessionActive) {
+      notifyProgress(tabId, `Menyiapkan Wrapped ${year === "all" ? "All Time" : year}...`);
+      sendMessageToTab(tabId, { action: "scrap", year }, result => {
+        if (!result?.ok || !result.response?.data?.success) {
+          console.warn("SCRAP_YEAR gagal:", result?.error || result?.response?.message || "No response");
+          if (result?.response?.data?.sessionActive === false) {
+            notifySessionRequired(tabId);
+          }
+          return;
+        }
+
+        if (result?.response?.data?.sessionActive === false) {
           notifySessionRequired(tabId);
           return;
         }
 
-        sendMessageToTab(tabId, { action: "scrap", year }, result => {
-          if (!result?.ok || !result.response?.data?.success) {
-            console.warn("SCRAP_YEAR gagal:", result?.error || result?.response?.message || "No response");
-            if (result?.response?.data?.sessionActive === false) {
-              notifySessionRequired(tabId);
-            }
-            return;
-          }
+        const secret = "JKT48Live";
+        const resulto = { data: result.response.data.data, year };
 
-          const secret = "JKT48Live";
-          const resulto = { data: result.response.data.data, year };
+        const encrypted = CryptoJS.AES.encrypt(
+          JSON.stringify(resulto),
+          secret
+        ).toString();
 
-          const encrypted = CryptoJS.AES.encrypt(
-            JSON.stringify(resulto),
-            secret
-          ).toString();
-
-          chrome.tabs.create({
-            url: "https://jkt48live.github.io/wrappedExtWeb/" + encodeURIComponent(encrypted)
-          });
+        notifyProgress(tabId, 'Membuka hasil Wrapped...');
+        chrome.tabs.create({
+          url: "https://jkt48live.github.io/wrappedExtWeb/" + encodeURIComponent(encrypted)
         });
       });
     });
